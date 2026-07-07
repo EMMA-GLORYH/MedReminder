@@ -1,13 +1,21 @@
 // lib/services/local_notification_service.dart
+
 import 'dart:convert';
 import 'package:flutter/foundation.dart';
+import 'package:flutter/material.dart';
 import 'package:flutter_local_notifications/flutter_local_notifications.dart';
+import 'package:mar/main.dart';
 import 'package:timezone/data/latest_all.dart' as tz;
 import 'package:timezone/timezone.dart' as tz;
 
 import 'dose_log_service.dart';
 import 'medication_tts_service.dart';
 import 'package:flutter/services.dart';
+
+import '../home/patients/medication_reminder_scanner_screen.dart';
+import '../services/schedule_service.dart';
+
+// Global navigator key to open screens from background/notification callbacks
 
 class LocalNotificationService {
   LocalNotificationService._();
@@ -19,7 +27,6 @@ class LocalNotificationService {
   static const _reminderChannelId = 'medication_reminders';
   static const _urgentChannelId = 'medication_urgent';
 
-  /// Native channel for auto-start/cancel alarms
   static const MethodChannel _ttsChannel = MethodChannel('medication_tts_background');
 
   Future<void> init() async {
@@ -44,7 +51,6 @@ class LocalNotificationService {
     final androidPlugin = _plugin.resolvePlatformSpecificImplementation<
         AndroidFlutterLocalNotificationsPlugin>();
     if (androidPlugin != null) {
-      // ✅ silent channels
       await androidPlugin.createNotificationChannel(
         const AndroidNotificationChannel(
           _reminderChannelId,
@@ -89,7 +95,6 @@ class LocalNotificationService {
       'dosageDisplay': dosageDisplay,
     });
 
-    // step 0
     final step0Time = scheduledFor;
     final step0AlarmId = _generateId(scheduleId, step0Time, 0);
 
@@ -108,43 +113,27 @@ class LocalNotificationService {
       'message': _buildTtsMessage(medicationName, dosageDisplay, step0Time),
     });
 
-    // step 1
-    final step1Time = scheduledFor.add(Duration(minutes: escalationStep1Mins));
-    final step1AlarmId = _generateId(scheduleId, step1Time, 1);
+    // Escalation 1 & 2 (silent notifications + TTS)
+    for (int step = 1; step <= 2; step++) {
+      final delay = step == 1 ? escalationStep1Mins : escalationStep2Mins;
+      final time = scheduledFor.add(Duration(minutes: delay));
+      final alarmId = _generateId(scheduleId, time, step);
 
-    await _schedule(
-      id: step1AlarmId,
-      title: 'Missed Dose Reminder',
-      body: medicationName,
-      time: step1Time,
-      payload: payload,
-      isUrgent: true,
-    );
+      await _schedule(
+        id: alarmId,
+        title: step == 1 ? 'Missed Dose Reminder' : 'Action Required',
+        body: medicationName,
+        time: time,
+        payload: payload,
+        isUrgent: true,
+      );
 
-    await _ttsChannel.invokeMethod('scheduleStart', {
-      'alarmId': step1AlarmId,
-      'startAtMillis': step1Time.millisecondsSinceEpoch,
-      'message': _buildTtsMessage(medicationName, dosageDisplay, step1Time),
-    });
-
-    // step 2
-    final step2Time = scheduledFor.add(Duration(minutes: escalationStep2Mins));
-    final step2AlarmId = _generateId(scheduleId, step2Time, 2);
-
-    await _schedule(
-      id: step2AlarmId,
-      title: 'Action Required',
-      body: medicationName,
-      time: step2Time,
-      payload: payload,
-      isUrgent: true,
-    );
-
-    await _ttsChannel.invokeMethod('scheduleStart', {
-      'alarmId': step2AlarmId,
-      'startAtMillis': step2Time.millisecondsSinceEpoch,
-      'message': _buildTtsMessage(medicationName, dosageDisplay, step2Time),
-    });
+      await _ttsChannel.invokeMethod('scheduleStart', {
+        'alarmId': alarmId,
+        'startAtMillis': time.millisecondsSinceEpoch,
+        'message': _buildTtsMessage(medicationName, dosageDisplay, time),
+      });
+    }
   }
 
   Future<void> _schedule({
@@ -199,7 +188,6 @@ class LocalNotificationService {
     int escalationStep1Mins = 10,
     int escalationStep2Mins = 20,
   }) async {
-    // cancel notifications + alarms for all steps
     final step0AlarmId = _generateId(scheduleId, scheduledFor, 0);
     final step1Time = scheduledFor.add(Duration(minutes: escalationStep1Mins));
     final step1AlarmId = _generateId(scheduleId, step1Time, 1);
@@ -210,14 +198,12 @@ class LocalNotificationService {
     await _plugin.cancel(id: step1AlarmId);
     await _plugin.cancel(id: step2AlarmId);
 
-    // cancel native TTS alarm
     try {
       await _ttsChannel.invokeMethod('cancelAlarm', {'alarmId': step0AlarmId});
       await _ttsChannel.invokeMethod('cancelAlarm', {'alarmId': step1AlarmId});
       await _ttsChannel.invokeMethod('cancelAlarm', {'alarmId': step2AlarmId});
     } catch (_) {}
 
-    // stop speaking right now
     try {
       await MedicationTtsService.instance.stop();
     } catch (_) {}
@@ -259,8 +245,10 @@ Future<void> _onNotificationTapped(NotificationResponse response) async {
   final scheduleId = data['scheduleId'] as String;
   final medicationId = data['medicationId'] as String;
   final scheduledFor = DateTime.parse(data['scheduledFor'] as String);
+  final medicationName = data['medicationName'] as String;
+  final dosageDisplay = data['dosageDisplay'] as String;
 
-  // If action pressed, mark taken (DoseLogService already stops TTS)
+  // If user pressed the action button
   if (response.actionId == 'MARK_TAKEN') {
     await DoseLogService.instance.markAsTaken(
       scheduleId: scheduleId,
@@ -270,5 +258,22 @@ Future<void> _onNotificationTapped(NotificationResponse response) async {
     return;
   }
 
-  // If user taps notification body, we could speak, but auto-start already handles it.
+  // Otherwise, open the full-screen scanner with TTS already running
+  final dose = TodayDose(
+    scheduleId: scheduleId,
+    medicationId: medicationId,
+    medicationName: medicationName,
+    genericName: medicationName,
+    dosageAmount: double.tryParse(dosageDisplay.split(' ').first) ?? 0.0,
+    dosageUnit: dosageDisplay.split(' ').last,
+    scheduledTime: scheduledFor,
+    pillImageUrl: null, // Will be loaded in scanner if needed
+  );
+
+  navigatorKey.currentState?.push(
+    MaterialPageRoute(
+      fullscreenDialog: true,
+      builder: (_) => MedicationReminderScannerScreen(dose: dose),
+    ),
+  );
 }

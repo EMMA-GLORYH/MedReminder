@@ -4,6 +4,8 @@ import 'package:flutter/foundation.dart';
 import '../main.dart';
 import '../models/medication.dart';
 import 'auth_service.dart';
+import 'dart:typed_data';
+import 'package:supabase_flutter/supabase_flutter.dart';
 
 class MedicationService {
   MedicationService._();
@@ -65,6 +67,40 @@ class MedicationService {
     }
   }
 
+  Future<String> uploadMedicationImage({
+    required Uint8List bytes,
+    required String fileName,
+  }) async {
+    final userId = AuthService.instance.currentUser?.id;
+    if (userId == null) throw Exception('Not logged in');
+
+    final cleanedName = fileName.replaceAll(RegExp(r'[^a-zA-Z0-9._-]'), '_');
+    final ext = cleanedName.contains('.')
+        ? cleanedName.split('.').last.toLowerCase()
+        : 'jpg';
+
+    final path =
+        '$userId/${DateTime.now().millisecondsSinceEpoch}_$cleanedName';
+
+    final contentType = switch (ext) {
+      'png' => 'image/png',
+      'webp' => 'image/webp',
+      'heic' => 'image/heic',
+      'heif' => 'image/heif',
+      _ => 'image/jpeg',
+    };
+
+    await supabase.storage.from('medication-images').uploadBinary(
+      path,
+      bytes,
+      fileOptions: FileOptions(
+        contentType: contentType,
+        upsert: false,
+      ),
+    );
+
+    return supabase.storage.from('medication-images').getPublicUrl(path);
+  }
   /// Fetch all active medications for the current patient
   Future<List<Medication>> getMyMedications() async {
     final userId = AuthService.instance.currentUser?.id;

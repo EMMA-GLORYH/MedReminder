@@ -12,8 +12,8 @@ class TodaysSchedule extends StatefulWidget {
   final VoidCallback onAddPressed;
   final VoidCallback? onViewAllPressed;
 
-  /// Set to 2 for dashboard preview.
-  /// Set to 0 or a negative number to show ALL remaining doses for today.
+  /// No limiting anymore.
+  /// This widget now always shows ALL remaining doses for today.
   final int maxDoses;
 
   /// Fires whenever a dose is marked taken so dashboard/stat cards can update.
@@ -24,7 +24,7 @@ class TodaysSchedule extends StatefulWidget {
     required this.onAddPressed,
     this.onViewAllPressed,
     this.onDoseTaken,
-    this.maxDoses = 2,
+    this.maxDoses = 0,
   });
 
   @override
@@ -94,7 +94,7 @@ class TodaysScheduleState extends State<TodaysSchedule> {
   // IMPORTANT:
   // Use LOCAL time here, not UTC.
   //
-  // Mobile devices use local time. Your ScheduleService creates TodayDose
+  // Mobile devices use local time. ScheduleService creates TodayDose
   // times in local device time. DoseLogService should also convert DB
   // scheduled_for back to local time before generating logged keys.
   //
@@ -235,41 +235,14 @@ class TodaysScheduleState extends State<TodaysSchedule> {
     }
   }
 
+  /// Always show all today's remaining untaken doses,
+  /// sorted from first dose to take to last.
   List<TodayDose> get _displayDoses {
     final untaken = _allDoses.where((d) => !_isDoseTaken(d)).toList();
 
-    // If maxDoses <= 0, show ALL today's remaining schedules.
-    if (widget.maxDoses <= 0) {
-      untaken.sort((a, b) => a.scheduledTime.compareTo(b.scheduledTime));
-      return untaken;
-    }
+    untaken.sort((a, b) => a.scheduledTime.compareTo(b.scheduledTime));
 
-    final upcoming = untaken.where((d) => !d.isPast).toList();
-    final missed = untaken.where((d) => d.isPast).toList();
-
-    upcoming.sort((a, b) => a.scheduledTime.compareTo(b.scheduledTime));
-    missed.sort((a, b) => a.scheduledTime.compareTo(b.scheduledTime));
-
-    if (upcoming.length >= widget.maxDoses) {
-      return upcoming.take(widget.maxDoses).toList();
-    }
-
-    final remainingSlots = widget.maxDoses - upcoming.length;
-
-    final combined = [
-      ...missed.reversed.take(remainingSlots),
-      ...upcoming,
-    ];
-
-    combined.sort((a, b) => a.scheduledTime.compareTo(b.scheduledTime));
-    return combined;
-  }
-
-  int get _hiddenCount {
-    if (widget.maxDoses <= 0) return 0;
-
-    final untaken = _allDoses.where((d) => !_isDoseTaken(d)).length;
-    return (untaken - _displayDoses.length).clamp(0, 999).toInt();
+    return untaken;
   }
 
   @override
@@ -304,11 +277,6 @@ class TodaysScheduleState extends State<TodaysSchedule> {
             ),
           ),
         ),
-        if (_hiddenCount > 0)
-          _MoreDosesTile(
-            count: _hiddenCount,
-            onTap: widget.onViewAllPressed,
-          ),
       ],
     );
   }
@@ -1094,70 +1062,6 @@ class _AllDoneCard extends StatelessWidget {
             textAlign: TextAlign.center,
           ),
         ],
-      ),
-    );
-  }
-}
-
-// ══════════════════════════════════════════════════════════════
-// MORE DOSES INDICATOR
-// ══════════════════════════════════════════════════════════════
-class _MoreDosesTile extends StatelessWidget {
-  final int count;
-  final VoidCallback? onTap;
-
-  const _MoreDosesTile({
-    required this.count,
-    this.onTap,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    return InkWell(
-      onTap: onTap,
-      borderRadius: BorderRadius.circular(14),
-      child: Container(
-        width: double.infinity,
-        padding: const EdgeInsets.symmetric(
-          vertical: 14,
-          horizontal: 16,
-        ),
-        decoration: BoxDecoration(
-          color: AppColors.surfaceVariant,
-          borderRadius: BorderRadius.circular(14),
-          border: Border.all(color: AppColors.border),
-        ),
-        child: Row(
-          children: [
-            Container(
-              padding: const EdgeInsets.all(6),
-              decoration: BoxDecoration(
-                color: AppColors.primary.withValues(alpha: 0.2),
-                shape: BoxShape.circle,
-              ),
-              child: const Icon(
-                Icons.more_horiz_rounded,
-                size: 16,
-                color: AppColors.secondary,
-              ),
-            ),
-            const SizedBox(width: 12),
-            Expanded(
-              child: Text(
-                '+$count more ${count == 1 ? 'dose' : 'doses'} today',
-                style: AppTextStyles.bodyMedium.copyWith(
-                  color: AppColors.secondary,
-                  fontWeight: FontWeight.w600,
-                ),
-              ),
-            ),
-            const Icon(
-              Icons.chevron_right_rounded,
-              color: AppColors.textSecondary,
-              size: 20,
-            ),
-          ],
-        ),
       ),
     );
   }

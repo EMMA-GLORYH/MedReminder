@@ -21,16 +21,26 @@ class MedicationCard extends StatelessWidget {
 
   Color get _pillColor {
     switch (medication.pillColor?.toLowerCase()) {
-      case 'white':  return Colors.white;
-      case 'blue':   return const Color(0xFF4A90E2);
-      case 'red':    return const Color(0xFFE53935);
-      case 'yellow': return const Color(0xFFFFC107);
-      case 'green':  return AppColors.primary;
-      case 'orange': return const Color(0xFFFF9800);
-      case 'pink':   return const Color(0xFFEC407A);
-      case 'purple': return const Color(0xFF9C27B0);
-      case 'brown':  return const Color(0xFF795548);
-      default:       return AppColors.surfaceVariant;
+      case 'white':
+        return Colors.white;
+      case 'blue':
+        return const Color(0xFF4A90E2);
+      case 'red':
+        return const Color(0xFFE53935);
+      case 'yellow':
+        return const Color(0xFFFFC107);
+      case 'green':
+        return AppColors.primary;
+      case 'orange':
+        return const Color(0xFFFF9800);
+      case 'pink':
+        return const Color(0xFFEC407A);
+      case 'purple':
+        return const Color(0xFF9C27B0);
+      case 'brown':
+        return const Color(0xFF795548);
+      default:
+        return AppColors.surfaceVariant;
     }
   }
 
@@ -38,6 +48,9 @@ class MedicationCard extends StatelessWidget {
       _pillColor == Colors.white ||
           _pillColor == const Color(0xFFFFC107) ||
           _pillColor == AppColors.surfaceVariant;
+
+  bool get _hasImage =>
+      medication.pillImageUrl != null && medication.pillImageUrl!.isNotEmpty;
 
   @override
   Widget build(BuildContext context) {
@@ -48,34 +61,22 @@ class MedicationCard extends StatelessWidget {
         onTap: onTap,
         borderRadius: BorderRadius.circular(14),
         child: Container(
-          padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
           decoration: BoxDecoration(
             borderRadius: BorderRadius.circular(14),
             border: Border.all(color: AppColors.border),
           ),
           child: Row(
             children: [
-              // Pill color indicator
-              Container(
-                width: 44,
-                height: 44,
-                decoration: BoxDecoration(
-                  color: _pillColor,
-                  borderRadius: BorderRadius.circular(12),
-                  border: Border.all(
-                    color: _isLightPill ? AppColors.border : Colors.transparent,
-                  ),
-                ),
-                child: Icon(
-                  Icons.medication_rounded,
-                  size: 20,
-                  color: _isLightPill ? AppColors.secondary : Colors.white,
-                ),
+              _MedicationThumbnail(
+                imageUrl: medication.pillImageUrl,
+                fallbackColor: _pillColor,
+                isLight: _isLightPill,
+                medicationType: medication.medicationType,
               ),
 
               const SizedBox(width: 12),
 
-              // Name + dosage + generic
               Expanded(
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
@@ -86,7 +87,9 @@ class MedicationCard extends StatelessWidget {
                       maxLines: 1,
                       overflow: TextOverflow.ellipsis,
                     ),
-                    const SizedBox(height: 2),
+
+                    const SizedBox(height: 3),
+
                     Row(
                       children: [
                         Text(
@@ -96,11 +99,14 @@ class MedicationCard extends StatelessWidget {
                             fontWeight: FontWeight.w600,
                           ),
                         ),
-                        if (medication.brandName != null) ...[
+                        if (medication.brandName != null &&
+                            medication.brandName!.isNotEmpty) ...[
                           Text(
                             '  •  ',
                             style: AppTextStyles.bodySmall.copyWith(
-                              color: AppColors.textSecondary.withValues(alpha: 0.5),
+                              color: AppColors.textSecondary.withValues(
+                                alpha: 0.5,
+                              ),
                             ),
                           ),
                           Flexible(
@@ -116,75 +122,156 @@ class MedicationCard extends StatelessWidget {
                         ],
                       ],
                     ),
+
+                    const SizedBox(height: 6),
+
+                    Row(
+                      children: [
+                        _StatusPill(
+                          label: medication.isScheduled ? 'Scheduled' : 'PRN',
+                          color: medication.isScheduled
+                              ? AppColors.info
+                              : AppColors.warning,
+                        ),
+
+                        if (medication.currentQuantity != null) ...[
+                          const SizedBox(width: 8),
+                          Text(
+                            '${medication.currentQuantity} left',
+                            style: AppTextStyles.labelSmall.copyWith(
+                              color: medication.needsRefill
+                                  ? AppColors.error
+                                  : AppColors.textSecondary,
+                              fontWeight: medication.needsRefill
+                                  ? FontWeight.w700
+                                  : FontWeight.w500,
+                            ),
+                          ),
+                        ],
+                      ],
+                    ),
                   ],
                 ),
               ),
 
               const SizedBox(width: 8),
 
-              // Right side: status + action
-              Column(
-                crossAxisAlignment: CrossAxisAlignment.end,
-                mainAxisAlignment: MainAxisAlignment.center,
-                children: [
-                  // Status badge
-                  _StatusPill(
-                    label: medication.isScheduled ? 'Scheduled' : 'PRN',
-                    color: medication.isScheduled ? AppColors.info : AppColors.warning,
+              if (medication.isScheduled && !hasSchedule)
+                InkWell(
+                  onTap: onScheduleTap,
+                  borderRadius: BorderRadius.circular(10),
+                  child: Container(
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 8,
+                      vertical: 6,
+                    ),
+                    decoration: BoxDecoration(
+                      color: AppColors.warning.withValues(alpha: 0.12),
+                      borderRadius: BorderRadius.circular(10),
+                    ),
+                    child: const Icon(
+                      Icons.schedule_rounded,
+                      size: 18,
+                      color: AppColors.warning,
+                    ),
                   ),
-
-                  // Quantity or schedule warning
-                  if (medication.isScheduled && !hasSchedule) ...[
-                    const SizedBox(height: 6),
-                    GestureDetector(
-                      onTap: onScheduleTap,
-                      child: Row(
-                        mainAxisSize: MainAxisSize.min,
-                        children: [
-                          const Icon(
-                            Icons.warning_amber_rounded,
-                            size: 14,
-                            color: AppColors.warning,
-                          ),
-                          const SizedBox(width: 4),
-                          Text(
-                            'Set time',
-                            style: AppTextStyles.labelSmall.copyWith(
-                              color: AppColors.warning,
-                              fontWeight: FontWeight.w600,
-                            ),
-                          ),
-                        ],
-                      ),
-                    ),
-                  ] else if (medication.currentQuantity != null) ...[
-                    const SizedBox(height: 6),
-                    Text(
-                      '${medication.currentQuantity} left',
-                      style: AppTextStyles.labelSmall.copyWith(
-                        color: medication.needsRefill
-                            ? AppColors.error
-                            : AppColors.textSecondary,
-                        fontWeight: medication.needsRefill
-                            ? FontWeight.w600
-                            : FontWeight.w400,
-                      ),
-                    ),
-                  ],
-                ],
-              ),
-
-              const SizedBox(width: 4),
-
-              // Chevron
-              Icon(
-                Icons.chevron_right_rounded,
-                size: 20,
-                color: AppColors.textSecondary.withValues(alpha: 0.5),
-              ),
+                )
+              else
+                Icon(
+                  Icons.chevron_right_rounded,
+                  size: 22,
+                  color: AppColors.textSecondary.withValues(alpha: 0.5),
+                ),
             ],
           ),
         ),
+      ),
+    );
+  }
+}
+
+class _MedicationThumbnail extends StatelessWidget {
+  final String? imageUrl;
+  final Color fallbackColor;
+  final bool isLight;
+  final String medicationType;
+
+  const _MedicationThumbnail({
+    required this.imageUrl,
+    required this.fallbackColor,
+    required this.isLight,
+    required this.medicationType,
+  });
+
+  bool get hasImage => imageUrl != null && imageUrl!.isNotEmpty;
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      width: 58,
+      height: 58,
+      decoration: BoxDecoration(
+        color: AppColors.surfaceVariant,
+        borderRadius: BorderRadius.circular(14),
+        border: Border.all(color: AppColors.border),
+      ),
+      clipBehavior: Clip.antiAlias,
+      child: hasImage
+          ? Image.network(
+        imageUrl!,
+        fit: BoxFit.cover,
+        loadingBuilder: (context, child, progress) {
+          if (progress == null) return child;
+
+          return const Center(
+            child: SizedBox(
+              width: 18,
+              height: 18,
+              child: CircularProgressIndicator(
+                strokeWidth: 2,
+                color: AppColors.primary,
+              ),
+            ),
+          );
+        },
+        errorBuilder: (_, __, ___) {
+          return _FallbackThumbnail(
+            color: fallbackColor,
+            isLight: isLight,
+            medicationType: medicationType,
+          );
+        },
+      )
+          : _FallbackThumbnail(
+        color: fallbackColor,
+        isLight: isLight,
+        medicationType: medicationType,
+      ),
+    );
+  }
+}
+
+class _FallbackThumbnail extends StatelessWidget {
+  final Color color;
+  final bool isLight;
+  final String medicationType;
+
+  const _FallbackThumbnail({
+    required this.color,
+    required this.isLight,
+    required this.medicationType,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      color: color,
+      child: Icon(
+        medicationType == 'prn'
+            ? Icons.medical_services_rounded
+            : Icons.medication_rounded,
+        size: 24,
+        color: isLight ? AppColors.secondary : Colors.white,
       ),
     );
   }
@@ -194,7 +281,10 @@ class _StatusPill extends StatelessWidget {
   final String label;
   final Color color;
 
-  const _StatusPill({required this.label, required this.color});
+  const _StatusPill({
+    required this.label,
+    required this.color,
+  });
 
   @override
   Widget build(BuildContext context) {
@@ -209,7 +299,7 @@ class _StatusPill extends StatelessWidget {
         style: AppTextStyles.labelSmall.copyWith(
           color: color,
           fontSize: 10,
-          fontWeight: FontWeight.w600,
+          fontWeight: FontWeight.w700,
         ),
       ),
     );

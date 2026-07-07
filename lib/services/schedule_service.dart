@@ -7,6 +7,49 @@ import '../models/medication_schedule.dart';
 import 'auth_service.dart';
 import 'local_notification_service.dart';
 
+class TodayDose {
+  final String scheduleId;
+  final String medicationId;
+  final String medicationName;
+  final String genericName;
+  final double dosageAmount;
+  final String dosageUnit;
+  final String? pillColor;
+  final String? pillShape;
+  final String? pillImageUrl;           // ← Added for scanner screen
+  final DateTime scheduledTime;
+  final String? notes;
+
+  TodayDose({
+    required this.scheduleId,
+    required this.medicationId,
+    required this.medicationName,
+    required this.genericName,
+    required this.dosageAmount,
+    required this.dosageUnit,
+    this.pillColor,
+    this.pillShape,
+    this.pillImageUrl,                  // ← Added
+    required this.scheduledTime,
+    this.notes,
+  });
+
+  String get dosageDisplay {
+    final amount = dosageAmount % 1 == 0
+        ? dosageAmount.toInt().toString()
+        : dosageAmount.toString();
+    return '$amount $dosageUnit';
+  }
+
+  bool get isPast => DateTime.now().isAfter(scheduledTime);
+  bool get isUpcoming => scheduledTime.isAfter(DateTime.now());
+
+  bool get isDueSoon {
+    final diff = scheduledTime.difference(DateTime.now()).inMinutes;
+    return diff >= 0 && diff <= 30;
+  }
+}
+
 class ScheduleService {
   ScheduleService._();
   static final ScheduleService instance = ScheduleService._();
@@ -36,8 +79,7 @@ class ScheduleService {
 
     final timesArray = scheduledTimes
         ?.map((t) =>
-    '${t.hour.toString().padLeft(2, '0')}:'
-        '${t.minute.toString().padLeft(2, '0')}:00')
+    '${t.hour.toString().padLeft(2, '0')}:${t.minute.toString().padLeft(2, '0')}:00')
         .toList();
 
     final nextScheduled = _computeNextScheduled(
@@ -101,9 +143,6 @@ class ScheduleService {
     }
   }
 
-  // ══════════════════════════════════════════════════════════════
-  // GET ALL ACTIVE SCHEDULES FOR CURRENT USER
-  // ══════════════════════════════════════════════════════════════
   Future<List<MedicationSchedule>> getMySchedules() async {
     final userId = AuthService.instance.currentUser?.id;
     if (userId == null) throw Exception('Not logged in');
@@ -115,12 +154,11 @@ class ScheduleService {
         .eq('is_active', true)
         .order('next_scheduled_at', ascending: true);
 
-    return (data as List).map((json) => MedicationSchedule.fromJson(json)).toList();
+    return (data as List)
+        .map((json) => MedicationSchedule.fromJson(json))
+        .toList();
   }
 
-  // ══════════════════════════════════════════════════════════════
-  // GET SCHEDULES FOR ONE MEDICATION
-  // ══════════════════════════════════════════════════════════════
   Future<List<MedicationSchedule>> getSchedulesForMedication(String medicationId) async {
     final data = await supabase
         .from('medication_schedules')
@@ -128,12 +166,11 @@ class ScheduleService {
         .eq('medication_id', medicationId)
         .eq('is_active', true);
 
-    return (data as List).map((json) => MedicationSchedule.fromJson(json)).toList();
+    return (data as List)
+        .map((json) => MedicationSchedule.fromJson(json))
+        .toList();
   }
 
-  // ══════════════════════════════════════════════════════════════
-  // DELETE SCHEDULE + CANCEL ITS ALARMS
-  // ══════════════════════════════════════════════════════════════
   Future<void> deleteSchedule(String id) async {
     await supabase.from('medication_schedules').update({
       'is_active': false,
@@ -141,12 +178,10 @@ class ScheduleService {
     }).eq('id', id);
 
     await LocalNotificationService.instance.cancelSchedule(id);
-    debugPrint('🗑️ Deleted schedule $id (Supabase + device alarms)');
+    debugPrint('🗑️ Deleted schedule $id');
   }
 
-  // ══════════════════════════════════════════════════════════════
-  // GET DOSES FOR A SPECIFIC DATE
-  // ══════════════════════════════════════════════════════════════
+  // Updated to load pill_image_url from medications table
   Future<List<TodayDose>> getDosesForDate(DateTime date) async {
     final userId = AuthService.instance.currentUser?.id;
     if (userId == null) throw Exception('Not logged in');
@@ -157,15 +192,13 @@ class ScheduleService {
     try {
       final data = await supabase
           .from('medication_schedules')
-          .select('*, medications!inner(*)')
+          .select('*, medications!inner(pill_image_url, *)')
           .eq('patient_id', userId)
           .eq('is_active', true)
           .lte('start_date', dateStr);
 
       final doses = <TodayDose>[];
-
-      // FIX: Use 1-7 for Monday-Sunday to match standard Flutter weekday
-      final weekday = date.weekday;
+      final weekday = date.weekday; // 1 = Monday ... 7 = Sunday
 
       for (final row in data as List) {
         final schedule = row as Map<String, dynamic>;
@@ -191,17 +224,25 @@ class ScheduleService {
           final hour = int.parse(parts[0]);
           final minute = int.parse(parts[1]);
 
-          final doseTime = DateTime(date.year, date.month, date.day, hour, minute);
+          final doseTime = DateTime(
+            date.year,
+            date.month,
+            date.day,
+            hour,
+            minute,
+          );
 
           doses.add(TodayDose(
             scheduleId: schedule['id'] as String,
             medicationId: medication['id'] as String,
-            medicationName: (medication['brand_name'] as String?) ?? medication['generic_name'] as String,
+            medicationName: (medication['brand_name'] as String?) ??
+                medication['generic_name'] as String,
             genericName: medication['generic_name'] as String,
             dosageAmount: (medication['dosage_amount'] as num).toDouble(),
             dosageUnit: medication['dosage_unit'] as String,
             pillColor: medication['pill_color'] as String?,
             pillShape: medication['pill_shape'] as String?,
+            pillImageUrl: medication['pill_image_url'] as String?,   // ← Added
             scheduledTime: doseTime,
             notes: medication['notes'] as String?,
           ));
@@ -211,8 +252,9 @@ class ScheduleService {
       doses.sort((a, b) => a.scheduledTime.compareTo(b.scheduledTime));
       debugPrint('✅ Loaded ${doses.length} doses');
       return doses;
-    } catch (e) {
+    } catch (e, st) {
       debugPrint('❌ Failed to load doses: $e');
+      debugPrint('$st');
       rethrow;
     }
   }
@@ -233,11 +275,23 @@ class ScheduleService {
       case 'multiple_daily':
         if (scheduledTimes == null || scheduledTimes.isEmpty) return null;
         for (final time in scheduledTimes) {
-          final candidate = DateTime(now.year, now.month, now.day, time.hour, time.minute);
+          final candidate = DateTime(
+            now.year,
+            now.month,
+            now.day,
+            time.hour,
+            time.minute,
+          );
           if (candidate.isAfter(now)) return candidate;
         }
         final first = scheduledTimes.first;
-        return DateTime(now.year, now.month, now.day + 1, first.hour, first.minute);
+        return DateTime(
+          now.year,
+          now.month,
+          now.day + 1,
+          first.hour,
+          first.minute,
+        );
 
       case 'every_x_hours':
         if (intervalHours == null) return null;
@@ -265,63 +319,25 @@ class ScheduleService {
     DateTime cursor = DateTime(startDate.year, startDate.month, startDate.day);
 
     while (!cursor.isAfter(limit)) {
-      final weekday = cursor.weekday; // 1-7
+      final weekday = cursor.weekday;
       final dayAllowed = scheduledDays == null ||
           scheduledDays.isEmpty ||
           scheduledDays.contains(weekday);
 
       if (dayAllowed) {
         for (final t in scheduledTimes) {
-          final dt = DateTime(cursor.year, cursor.month, cursor.day, t.hour, t.minute);
+          final dt = DateTime(
+            cursor.year,
+            cursor.month,
+            cursor.day,
+            t.hour,
+            t.minute,
+          );
           if (dt.isAfter(now)) result.add(dt);
         }
       }
       cursor = cursor.add(const Duration(days: 1));
     }
     return result;
-  }
-}
-
-// ══════════════════════════════════════════════════════════════
-// TODAY DOSE MODEL
-// ══════════════════════════════════════════════════════════════
-class TodayDose {
-  final String scheduleId;
-  final String medicationId;
-  final String medicationName;
-  final String genericName;
-  final double dosageAmount;
-  final String dosageUnit;
-  final String? pillColor;
-  final String? pillShape;
-  final DateTime scheduledTime;
-  final String? notes;
-
-  TodayDose({
-    required this.scheduleId,
-    required this.medicationId,
-    required this.medicationName,
-    required this.genericName,
-    required this.dosageAmount,
-    required this.dosageUnit,
-    this.pillColor,
-    this.pillShape,
-    required this.scheduledTime,
-    this.notes,
-  });
-
-  String get dosageDisplay {
-    final amount = dosageAmount % 1 == 0
-        ? dosageAmount.toInt().toString()
-        : dosageAmount.toString();
-    return '$amount $dosageUnit';
-  }
-
-  bool get isPast => DateTime.now().isAfter(scheduledTime);
-  bool get isUpcoming => scheduledTime.isAfter(DateTime.now());
-
-  bool get isDueSoon {
-    final diff = scheduledTime.difference(DateTime.now()).inMinutes;
-    return diff >= 0 && diff <= 30;
   }
 }

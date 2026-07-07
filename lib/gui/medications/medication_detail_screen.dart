@@ -13,7 +13,10 @@ import 'edit_medication_screen.dart';
 class MedicationDetailScreen extends StatefulWidget {
   final Medication medication;
 
-  const MedicationDetailScreen({super.key, required this.medication});
+  const MedicationDetailScreen({
+    super.key,
+    required this.medication,
+  });
 
   @override
   State<MedicationDetailScreen> createState() =>
@@ -46,18 +49,21 @@ class _MedicationDetailScreenState extends State<MedicationDetailScreen> {
     if (confirmed != true || !mounted) return;
 
     setState(() => _isDeleting = true);
+
     try {
       await MedicationService.instance.deleteMedicationWithSchedules(
         _medication.id,
       );
+
       if (!mounted) return;
+
       AppSnackbar.success(context, 'Medication removed');
       Navigator.pop(context, true);
     } catch (_) {
-      if (mounted) {
-        AppSnackbar.error(context, 'Failed to delete medication');
-        setState(() => _isDeleting = false);
-      }
+      if (!mounted) return;
+
+      AppSnackbar.error(context, 'Failed to delete medication');
+      setState(() => _isDeleting = false);
     }
   }
 
@@ -68,10 +74,12 @@ class _MedicationDetailScreenState extends State<MedicationDetailScreen> {
         builder: (_) => EditMedicationScreen(medication: _medication),
       ),
     );
+
     if (result == true && mounted) {
-      // Reload the medication
-      final updated = await MedicationService.instance
-          .getMedicationById(_medication.id);
+      final updated = await MedicationService.instance.getMedicationById(
+        _medication.id,
+      );
+
       if (updated != null && mounted) {
         setState(() {
           _medication = updated;
@@ -91,6 +99,7 @@ class _MedicationDetailScreenState extends State<MedicationDetailScreen> {
         ),
       ),
     );
+
     if (result == true && mounted) {
       setState(() => _wasModified = true);
     }
@@ -98,26 +107,30 @@ class _MedicationDetailScreenState extends State<MedicationDetailScreen> {
 
   Future<void> _toggleActive(bool value) async {
     setState(() => _isToggling = true);
+
     try {
       final updated = await MedicationService.instance.toggleActive(
         _medication.id,
         value,
       );
+
       if (!mounted) return;
+
       setState(() {
         _medication = updated;
         _wasModified = true;
         _isToggling = false;
       });
+
       AppSnackbar.success(
         context,
         value ? 'Medication activated' : 'Medication deactivated',
       );
     } catch (_) {
-      if (mounted) {
-        AppSnackbar.error(context, 'Failed to toggle status');
-        setState(() => _isToggling = false);
-      }
+      if (!mounted) return;
+
+      AppSnackbar.error(context, 'Failed to toggle status');
+      setState(() => _isToggling = false);
     }
   }
 
@@ -146,7 +159,9 @@ class _MedicationDetailScreenState extends State<MedicationDetailScreen> {
                           isLoading: _isToggling,
                           onChanged: _toggleActive,
                         ),
+
                         const SizedBox(height: 16),
+
                         if (med.notes != null && med.notes!.isNotEmpty) ...[
                           _DetailSection(
                             icon: Icons.note_alt_rounded,
@@ -158,6 +173,7 @@ class _MedicationDetailScreenState extends State<MedicationDetailScreen> {
                           ),
                           const SizedBox(height: 16),
                         ],
+
                         _DetailSection(
                           icon: Icons.info_outline_rounded,
                           title: 'Information',
@@ -182,10 +198,19 @@ class _MedicationDetailScreenState extends State<MedicationDetailScreen> {
                                   'Shape',
                                   _capitalize(med.pillShape!),
                                 ),
+                              _DetailRow(
+                                'Image',
+                                med.pillImageUrl != null &&
+                                    med.pillImageUrl!.isNotEmpty
+                                    ? 'Saved'
+                                    : 'Not added',
+                              ),
                             ],
                           ),
                         ),
+
                         const SizedBox(height: 16),
+
                         _DetailSection(
                           icon: Icons.inventory_2_rounded,
                           title: 'Inventory',
@@ -207,8 +232,9 @@ class _MedicationDetailScreenState extends State<MedicationDetailScreen> {
                                   child: Container(
                                     padding: const EdgeInsets.all(10),
                                     decoration: BoxDecoration(
-                                      color: AppColors.warning
-                                          .withValues(alpha: 0.15),
+                                      color: AppColors.warning.withValues(
+                                        alpha: 0.15,
+                                      ),
                                       borderRadius: BorderRadius.circular(8),
                                     ),
                                     child: Row(
@@ -236,7 +262,9 @@ class _MedicationDetailScreenState extends State<MedicationDetailScreen> {
                             ],
                           ),
                         ),
+
                         const SizedBox(height: 16),
+
                         _DetailSection(
                           icon: Icons.access_time_rounded,
                           title: 'Timeline',
@@ -254,6 +282,7 @@ class _MedicationDetailScreenState extends State<MedicationDetailScreen> {
                             ],
                           ),
                         ),
+
                         if (med.isScheduled) ...[
                           const SizedBox(height: 16),
                           _ManageScheduleCard(onTap: _manageSchedule),
@@ -263,6 +292,7 @@ class _MedicationDetailScreenState extends State<MedicationDetailScreen> {
                   ),
                 ],
               ),
+
               _FloatingActions(
                 onEdit: _edit,
                 onDelete: _delete,
@@ -275,45 +305,256 @@ class _MedicationDetailScreenState extends State<MedicationDetailScreen> {
     );
   }
 
-  String _capitalize(String s) =>
-      s.isEmpty ? s : '${s[0].toUpperCase()}${s.substring(1)}';
+  String _capitalize(String s) {
+    return s.isEmpty ? s : '${s[0].toUpperCase()}${s.substring(1)}';
+  }
 
   String _formatDate(DateTime date) {
     const months = [
-      'Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
-      'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec',
+      'Jan',
+      'Feb',
+      'Mar',
+      'Apr',
+      'May',
+      'Jun',
+      'Jul',
+      'Aug',
+      'Sep',
+      'Oct',
+      'Nov',
+      'Dec',
     ];
+
     return '${months[date.month - 1]} ${date.day}, ${date.year}';
   }
 }
 
 // ══════════════════════════════════════════════════════════════
-// STICKY HERO with medication visual
+// SMALLER HERO WITH FULL BACKGROUND MEDICATION IMAGE
 // ══════════════════════════════════════════════════════════════
 class _DetailHero extends StatelessWidget {
   final Medication medication;
-  const _DetailHero({required this.medication});
+
+  const _DetailHero({
+    required this.medication,
+  });
+
+  bool get _hasImage =>
+      medication.pillImageUrl != null && medication.pillImageUrl!.isNotEmpty;
+
+  static const double _heroHeight = 260;   // Reduced from 320
+
+  @override
+  Widget build(BuildContext context) {
+    return ClipRRect(
+      borderRadius: const BorderRadius.only(
+        bottomLeft: Radius.circular(28),
+        bottomRight: Radius.circular(28),
+      ),
+      child: SizedBox(
+        width: double.infinity,
+        height: _heroHeight,
+        child: Stack(
+          fit: StackFit.expand,
+          children: [
+            // Background image fills the entire hero
+            if (_hasImage)
+              Image.network(
+                medication.pillImageUrl!,
+                fit: BoxFit.cover,
+                loadingBuilder: (context, child, progress) {
+                  if (progress == null) return child;
+
+                  return Container(
+                    color: AppColors.surfaceVariant,
+                    child: const Center(
+                      child: CircularProgressIndicator(
+                        strokeWidth: 2,
+                        color: AppColors.primary,
+                      ),
+                    ),
+                  );
+                },
+                errorBuilder: (_, __, ___) {
+                  return _FallbackHeroBackground(
+                    color: _pillColor,
+                    icon: _getIconForForm(medication.dosageUnit),
+                    isLight: _isLightColor(_pillColor),
+                  );
+                },
+              )
+            else
+              _FallbackHeroBackground(
+                color: _pillColor,
+                icon: _getIconForForm(medication.dosageUnit),
+                isLight: _isLightColor(_pillColor),
+              ),
+
+            // Dark overlay for better text readability when image is present
+            if (_hasImage)
+              Container(
+                decoration: BoxDecoration(
+                  gradient: LinearGradient(
+                    colors: [
+                      Colors.black.withValues(alpha: 0.55),
+                      Colors.black.withValues(alpha: 0.25),
+                      Colors.black.withValues(alpha: 0.65),
+                    ],
+                    begin: Alignment.topCenter,
+                    end: Alignment.bottomCenter,
+                  ),
+                ),
+              ),
+
+            // Top bar
+            Positioned(
+              top: 8,
+              left: 8,
+              right: 8,
+              child: Row(
+                children: [
+                  IconButton(
+                    icon: const Icon(Icons.arrow_back_rounded),
+                    onPressed: () => Navigator.pop(context),
+                    color: _hasImage ? Colors.white : AppColors.secondary,
+                  ),
+                  Expanded(
+                    child: Text(
+                      'Medication Details',
+                      style: AppTextStyles.titleMedium.copyWith(
+                        color: _hasImage ? Colors.white : AppColors.textPrimary,
+                      ),
+                      textAlign: TextAlign.center,
+                    ),
+                  ),
+                  const SizedBox(width: 48),
+                ],
+              ),
+            ),
+
+            // Bottom content (pushed up due to smaller height)
+            Positioned(
+              left: 20,
+              right: 20,
+              bottom: 24,
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Container(
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 14,
+                      vertical: 6,
+                    ),
+                    decoration: BoxDecoration(
+                      color: (_hasImage ? Colors.white : AppColors.primary)
+                          .withValues(alpha: _hasImage ? 0.18 : 0.25),
+                      borderRadius: BorderRadius.circular(20),
+                      border: Border.all(
+                        color: (_hasImage ? Colors.white : AppColors.primary)
+                            .withValues(alpha: 0.35),
+                      ),
+                    ),
+                    child: Text(
+                      medication.isScheduled ? 'Scheduled' : 'As Needed',
+                      style: AppTextStyles.labelMedium.copyWith(
+                        color: _hasImage ? Colors.white : AppColors.secondary,
+                        fontWeight: FontWeight.w700,
+                      ),
+                    ),
+                  ),
+
+                  const SizedBox(height: 12),
+
+                  Text(
+                    medication.displayName,
+                    style: AppTextStyles.h1.copyWith(
+                      color: _hasImage ? Colors.white : AppColors.textPrimary,
+                      fontSize: 26, // Slightly smaller text for compact hero
+                    ),
+                    textAlign: TextAlign.center,
+                    maxLines: 2,
+                    overflow: TextOverflow.ellipsis,
+                  ),
+
+                  const SizedBox(height: 4),
+
+                  Text(
+                    medication.displayDosage,
+                    style: AppTextStyles.titleMedium.copyWith(
+                      color: _hasImage
+                          ? Colors.white.withValues(alpha: 0.90)
+                          : AppColors.secondary,
+                    ),
+                    textAlign: TextAlign.center,
+                  ),
+                ],
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
 
   Color get _pillColor {
     switch (medication.pillColor?.toLowerCase()) {
-      case 'white': return Colors.white;
-      case 'blue': return const Color(0xFF4A90E2);
-      case 'red': return const Color(0xFFE53935);
-      case 'yellow': return const Color(0xFFFFC107);
-      case 'green': return AppColors.primary;
-      case 'orange': return const Color(0xFFFF9800);
-      case 'pink': return const Color(0xFFEC407A);
-      case 'purple': return const Color(0xFF9C27B0);
-      case 'brown': return const Color(0xFF795548);
-      default: return AppColors.secondary;
+      case 'white':
+        return Colors.white;
+      case 'blue':
+        return const Color(0xFF4A90E2);
+      case 'red':
+        return const Color(0xFFE53935);
+      case 'yellow':
+        return const Color(0xFFFFC107);
+      case 'green':
+        return AppColors.primary;
+      case 'orange':
+        return const Color(0xFFFF9800);
+      case 'pink':
+        return const Color(0xFFEC407A);
+      case 'purple':
+        return const Color(0xFF9C27B0);
+      case 'brown':
+        return const Color(0xFF795548);
+      default:
+        return AppColors.secondary;
     }
   }
+
+  bool _isLightColor(Color color) {
+    return color == Colors.white ||
+        color == const Color(0xFFFFC107) ||
+        color == AppColors.surfaceVariant;
+  }
+
+  IconData _getIconForForm(String unit) {
+    switch (unit.toLowerCase()) {
+      case 'ml':
+        return Icons.medication_liquid_rounded;
+      case 'tablets':
+        return Icons.medication_rounded;
+      case 'units':
+        return Icons.vaccines_rounded;
+      default:
+        return Icons.medication_rounded;
+    }
+  }
+}
+
+class _FallbackHeroBackground extends StatelessWidget {
+  final Color color;
+  final IconData icon;
+  final bool isLight;
+
+  const _FallbackHeroBackground({
+    required this.color,
+    required this.icon,
+    required this.isLight,
+  });
 
   @override
   Widget build(BuildContext context) {
     return Container(
-      width: double.infinity,
-      padding: const EdgeInsets.fromLTRB(20, 12, 20, 24),
       decoration: BoxDecoration(
         gradient: LinearGradient(
           colors: [
@@ -323,77 +564,33 @@ class _DetailHero extends StatelessWidget {
           begin: Alignment.topLeft,
           end: Alignment.bottomRight,
         ),
-        borderRadius: const BorderRadius.only(
-          bottomLeft: Radius.circular(28),
-          bottomRight: Radius.circular(28),
-        ),
       ),
-      child: Column(
-        children: [
-          Row(
-            children: [
-              IconButton(
-                icon: const Icon(Icons.arrow_back_rounded),
-                onPressed: () => Navigator.pop(context),
-                color: AppColors.secondary,
+      child: Center(
+        child: Container(
+          width: 110,
+          height: 110,
+          decoration: BoxDecoration(
+            color: color,
+            borderRadius: BorderRadius.circular(24),
+            border: Border.all(
+              color: isLight ? AppColors.border : Colors.transparent,
+            ),
+            boxShadow: [
+              BoxShadow(
+                color: AppColors.primary.withValues(alpha: 0.18),
+                blurRadius: 20,
+                offset: const Offset(0, 8),
               ),
-              Expanded(
-                child: Text(
-                  'Medication Details',
-                  style: AppTextStyles.titleMedium,
-                  textAlign: TextAlign.center,
-                ),
-              ),
-              const SizedBox(width: 48),
             ],
           ),
-          const SizedBox(height: 8),
-          Container(
-            padding: const EdgeInsets.all(16),
-            decoration: BoxDecoration(
-              color: AppColors.primary,
-              shape: BoxShape.circle,
-              boxShadow: [
-                BoxShadow(
-                  color: AppColors.primary.withValues(alpha: 0.3),
-                  blurRadius: 20,
-                  spreadRadius: 2,
-                ),
-              ],
-            ),
-            child: Icon(
-              _getIconForForm(medication.dosageUnit),
-              size: 36,
-              color: AppColors.secondary,
-            ),
+          child: Icon(
+            icon,
+            size: 42,
+            color: isLight ? AppColors.secondary : Colors.white,
           ),
-          const SizedBox(height: 16),
-          Text(
-            medication.displayName,
-            style: AppTextStyles.h1,
-            textAlign: TextAlign.center,
-            maxLines: 2,
-            overflow: TextOverflow.ellipsis,
-          ),
-          const SizedBox(height: 4),
-          Text(
-            medication.displayDosage,
-            style: AppTextStyles.titleMedium.copyWith(
-              color: AppColors.secondary,
-            ),
-          ),
-        ],
+        ),
       ),
     );
-  }
-
-  IconData _getIconForForm(String unit) {
-    switch (unit.toLowerCase()) {
-      case 'ml': return Icons.medication_liquid_rounded;
-      case 'tablets': return Icons.medication_rounded;
-      case 'units': return Icons.vaccines_rounded;
-      default: return Icons.medication_rounded;
-    }
   }
 }
 
@@ -442,7 +639,9 @@ class _ActiveToggleCard extends StatelessWidget {
               color: isActive ? AppColors.secondary : Colors.white,
             ),
           ),
+
           const SizedBox(width: 12),
+
           Expanded(
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
@@ -452,14 +651,13 @@ class _ActiveToggleCard extends StatelessWidget {
                   style: AppTextStyles.titleSmall,
                 ),
                 Text(
-                  isActive
-                      ? 'Reminders are on'
-                      : 'No reminders will fire',
+                  isActive ? 'Reminders are on' : 'No reminders will fire',
                   style: AppTextStyles.bodySmall,
                 ),
               ],
             ),
           ),
+
           if (isLoading)
             const SizedBox(
               width: 40,
@@ -493,7 +691,10 @@ class _ActiveToggleCard extends StatelessWidget {
 // ══════════════════════════════════════════════════════════════
 class _ManageScheduleCard extends StatelessWidget {
   final VoidCallback onTap;
-  const _ManageScheduleCard({required this.onTap});
+
+  const _ManageScheduleCard({
+    required this.onTap,
+  });
 
   @override
   Widget build(BuildContext context) {
@@ -510,7 +711,7 @@ class _ManageScheduleCard extends StatelessWidget {
           children: [
             Container(
               padding: const EdgeInsets.all(10),
-              decoration: BoxDecoration(
+              decoration: const BoxDecoration(
                 color: AppColors.primary,
                 shape: BoxShape.circle,
               ),
@@ -520,7 +721,9 @@ class _ManageScheduleCard extends StatelessWidget {
                 size: 20,
               ),
             ),
+
             const SizedBox(width: 14),
+
             Expanded(
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
@@ -540,6 +743,7 @@ class _ManageScheduleCard extends StatelessWidget {
                 ],
               ),
             ),
+
             const Icon(
               Icons.chevron_right_rounded,
               color: Colors.white,
@@ -552,7 +756,7 @@ class _ManageScheduleCard extends StatelessWidget {
 }
 
 // ══════════════════════════════════════════════════════════════
-// FLOATING ACTION ICONS (Edit + Delete)
+// FLOATING ACTION ICONS
 // ══════════════════════════════════════════════════════════════
 class _FloatingActions extends StatelessWidget {
   final VoidCallback onEdit;
@@ -582,9 +786,7 @@ class _FloatingActions extends StatelessWidget {
           ),
           const SizedBox(width: 12),
           _FabButton(
-            icon: isDeleting
-                ? null
-                : Icons.delete_outline_rounded,
+            icon: isDeleting ? null : Icons.delete_outline_rounded,
             background: AppColors.error,
             iconColor: Colors.white,
             onTap: isDeleting ? null : onDelete,
@@ -699,6 +901,7 @@ class _DetailSection extends StatelessWidget {
 class _DetailRow extends StatelessWidget {
   final String label;
   final String value;
+
   const _DetailRow(this.label, this.value);
 
   @override
@@ -707,7 +910,9 @@ class _DetailRow extends StatelessWidget {
       padding: const EdgeInsets.symmetric(vertical: 6),
       child: Row(
         children: [
-          Expanded(child: Text(label, style: AppTextStyles.bodySmall)),
+          Expanded(
+            child: Text(label, style: AppTextStyles.bodySmall),
+          ),
           Flexible(
             child: Text(
               value,
