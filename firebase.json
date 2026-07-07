@@ -1,0 +1,40 @@
+{
+  "flutter": {
+    "platforms": {
+      "android": {
+        "default": {
+          "projectId": "medreminder-c79da",
+          "appId": "1:86292373851:android:2d7bd6c79291492a9c3a7e",
+          "fileOutput": "android/app/google-services.json"
+        }
+      },
+      "dart": {
+        "lib/firebase_options.dart": {
+          "projectId": "medreminder-c79da",
+          "configurations": {
+            "android": "1:86292373851:android:2d7bd6c79291492a9c3a7e",
+            "ios": "1:86292373851:ios:189b69e5c09820919c3a7e",
+            "web": "1:86292373851:web:e6801e2a83dc03069c3a7e"
+          }
+        }
+      }
+    }
+  },
+  "functions": [
+    {
+      "source": "functions",
+      "codebase": "default",
+      "disallowLegacyRuntimeConfig": true,
+      "ignore": [
+        "node_modules",
+        ".git",
+        "firebase-debug.log",
+        "firebase-debug.*.log",
+        "*.local"
+      ],
+      "predeploy": [
+        "npm --prefix \"$RESOURCE_DIR\" run build"
+      ]
+    }
+  ]
+}
