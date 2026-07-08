@@ -12,8 +12,8 @@ class TodaysSchedule extends StatefulWidget {
   final VoidCallback onAddPressed;
   final VoidCallback? onViewAllPressed;
 
-  /// No limiting anymore.
-  /// This widget now always shows ALL remaining doses for today.
+
+  /// This shows ALL remaining doses for today.
   final int maxDoses;
 
   /// Fires whenever a dose is marked taken so dashboard/stat cards can update.

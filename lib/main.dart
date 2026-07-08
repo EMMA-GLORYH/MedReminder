@@ -9,7 +9,7 @@ import 'gui/splash_screen.dart';
 import 'services/local_notification_service.dart';
 import 'theme/app_theme.dart';
 
-// ✅ Global navigator key — allows pushing screens from notification/TTS callbacks
+// Global navigator key - Used to open full-screen scanner from notifications and background handlers
 final GlobalKey<NavigatorState> navigatorKey = GlobalKey<NavigatorState>();
 
 Future<void> main() async {
@@ -69,7 +69,7 @@ class MyApp extends StatelessWidget {
       title: 'MedReminder',
       debugShowCheckedModeBanner: false,
       theme: AppTheme.lightTheme,
-      navigatorKey: navigatorKey, // ✅ Attached for background navigation
+      navigatorKey: navigatorKey,           // ← Required for scanner screen
       home: const SplashScreen(),
     );
   }

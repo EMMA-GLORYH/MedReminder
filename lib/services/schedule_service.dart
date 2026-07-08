@@ -7,6 +7,7 @@ import '../models/medication_schedule.dart';
 import 'auth_service.dart';
 import 'local_notification_service.dart';
 
+/// Single source of truth for TodayDose - used by scanner and dashboard
 class TodayDose {
   final String scheduleId;
   final String medicationId;
@@ -16,7 +17,7 @@ class TodayDose {
   final String dosageUnit;
   final String? pillColor;
   final String? pillShape;
-  final String? pillImageUrl;           // ← Added for scanner screen
+  final String? pillImageUrl;           // Used by scanner screen
   final DateTime scheduledTime;
   final String? notes;
 
@@ -29,7 +30,7 @@ class TodayDose {
     required this.dosageUnit,
     this.pillColor,
     this.pillShape,
-    this.pillImageUrl,                  // ← Added
+    this.pillImageUrl,
     required this.scheduledTime,
     this.notes,
   });
@@ -181,7 +182,6 @@ class ScheduleService {
     debugPrint('🗑️ Deleted schedule $id');
   }
 
-  // Updated to load pill_image_url from medications table
   Future<List<TodayDose>> getDosesForDate(DateTime date) async {
     final userId = AuthService.instance.currentUser?.id;
     if (userId == null) throw Exception('Not logged in');
@@ -198,7 +198,7 @@ class ScheduleService {
           .lte('start_date', dateStr);
 
       final doses = <TodayDose>[];
-      final weekday = date.weekday; // 1 = Monday ... 7 = Sunday
+      final weekday = date.weekday;
 
       for (final row in data as List) {
         final schedule = row as Map<String, dynamic>;
@@ -242,7 +242,7 @@ class ScheduleService {
             dosageUnit: medication['dosage_unit'] as String,
             pillColor: medication['pill_color'] as String?,
             pillShape: medication['pill_shape'] as String?,
-            pillImageUrl: medication['pill_image_url'] as String?,   // ← Added
+            pillImageUrl: medication['pill_image_url'] as String?,
             scheduledTime: doseTime,
             notes: medication['notes'] as String?,
           ));
@@ -250,7 +250,7 @@ class ScheduleService {
       }
 
       doses.sort((a, b) => a.scheduledTime.compareTo(b.scheduledTime));
-      debugPrint('✅ Loaded ${doses.length} doses');
+      debugPrint('✅ Loaded ${doses.length} doses for today');
       return doses;
     } catch (e, st) {
       debugPrint('❌ Failed to load doses: $e');
@@ -259,9 +259,6 @@ class ScheduleService {
     }
   }
 
-  // ══════════════════════════════════════════════════════════════
-  // HELPERS
-  // ══════════════════════════════════════════════════════════════
   static DateTime? _computeNextScheduled({
     required String frequencyType,
     List<TimeOfDay>? scheduledTimes,
