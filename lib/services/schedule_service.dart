@@ -144,6 +144,104 @@ class ScheduleService {
     }
   }
 
+  // ══════════════════════════════════════════════════════════════
+  // UPDATE SCHEDULE + RESET DEVICE ALARMS
+  // ══════════════════════════════════════════════════════════════
+  Future<MedicationSchedule> updateSchedule({
+    required String id,
+    required String medicationId,
+    required String medicationName,
+    required String dosageDisplay,
+    required String frequencyType,
+    double? intervalHours,
+    double? minHoursBetween,
+    List<TimeOfDay>? scheduledTimes,
+    List<int>? scheduledDays,
+    DateTime? startDate,
+    DateTime? endDate,
+    bool escalationEnabled = true,
+    int escalationStep1Mins = 10,
+    int escalationStep2Mins = 20,
+  }) async {
+    debugPrint('📅 Updating schedule: $id for $medicationName');
+
+    final timesArray = scheduledTimes
+        ?.map((t) =>
+    '${t.hour.toString().padLeft(2, '0')}:${t.minute.toString().padLeft(2, '0')}:00')
+        .toList();
+
+    final nextScheduled = _computeNextScheduled(
+      frequencyType: frequencyType,
+      scheduledTimes: scheduledTimes,
+      intervalHours: intervalHours,
+      startDate: startDate ?? DateTime.now(),
+    );
+
+    try {
+      // Cancel old alarms first so no duplicates fire
+      await LocalNotificationService.instance.cancelSchedule(id);
+      debugPrint('🔕 Cancelled old alarms for schedule $id');
+
+      final data = await supabase
+          .from('medication_schedules')
+          .update({
+        'frequency_type': frequencyType,
+        'interval_hours': intervalHours,
+        'min_hours_between': minHoursBetween,
+        'scheduled_times': timesArray,
+        'scheduled_days': scheduledDays,
+        'start_date': (startDate ?? DateTime.now()).toIso8601String().split('T').first,
+        'end_date': endDate?.toIso8601String().split('T').first,
+        'next_scheduled_at': nextScheduled?.toIso8601String(),
+        'escalation_enabled': escalationEnabled,
+        'escalation_step1_mins': escalationStep1Mins,
+        'escalation_step2_mins': escalationStep2Mins,
+        'updated_at': DateTime.now().toIso8601String(),
+      })
+          .eq('id', id)
+          .select()
+          .single();
+
+      final schedule = MedicationSchedule.fromJson(data);
+      debugPrint('✅ Supabase schedule updated: ${schedule.id}');
+
+      // Re-schedule fresh alarms with new times
+      if (frequencyType != 'as_needed' &&
+          scheduledTimes != null &&
+          scheduledTimes.isNotEmpty) {
+        final futureTimes = _buildFutureDateTimes(
+          scheduledTimes: scheduledTimes,
+          startDate: startDate ?? DateTime.now(),
+          endDate: endDate,
+          scheduledDays: scheduledDays,
+        );
+
+        int alarmCount = 0;
+        for (final time in futureTimes) {
+          await LocalNotificationService.instance.scheduleForDose(
+            scheduleId: schedule.id,
+            medicationId: medicationId,
+            medicationName: medicationName,
+            dosageDisplay: dosageDisplay,
+            scheduledFor: time,
+            escalationStep1Mins: escalationStep1Mins,
+            escalationStep2Mins: escalationStep2Mins,
+          );
+          alarmCount++;
+        }
+        debugPrint('🔔 Re-scheduled $alarmCount alarms');
+      }
+
+      return schedule;
+    } catch (e) {
+      debugPrint('❌ Failed to update schedule: $e');
+      rethrow;
+    }
+  }
+
+  // ══════════════════════════════════════════════════════════════
+  // READ SCHEDULES
+  // ══════════════════════════════════════════════════════════════
   Future<List<MedicationSchedule>> getMySchedules() async {
     final userId = AuthService.instance.currentUser?.id;
     if (userId == null) throw Exception('Not logged in');
@@ -172,6 +270,9 @@ class ScheduleService {
         .toList();
   }
 
+  // ══════════════════════════════════════════════════════════════
+  // DELETE SCHEDULE
+  // ══════════════════════════════════════════════════════════════
   Future<void> deleteSchedule(String id) async {
     await supabase.from('medication_schedules').update({
       'is_active': false,
@@ -182,6 +283,9 @@ class ScheduleService {
     debugPrint('🗑️ Deleted schedule $id');
   }
 
+  // ══════════════════════════════════════════════════════════════
+  // GET DOSES FOR A SPECIFIC DATE
+  // ══════════════════════════════════════════════════════════════
   Future<List<TodayDose>> getDosesForDate(DateTime date) async {
     final userId = AuthService.instance.currentUser?.id;
     if (userId == null) throw Exception('Not logged in');
@@ -259,6 +363,9 @@ class ScheduleService {
     }
   }
 
+  // ══════════════════════════════════════════════════════════════
+  // PRIVATE HELPERS
+  // ══════════════════════════════════════════════════════════════
   static DateTime? _computeNextScheduled({
     required String frequencyType,
     List<TimeOfDay>? scheduledTimes,

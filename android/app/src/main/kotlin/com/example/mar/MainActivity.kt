@@ -1,3 +1,5 @@
+// android/app/src/main/kotlin/com/example/mar/MainActivity.kt
+
 package com.example.mar
 
 import android.app.AlarmManager
@@ -20,10 +22,11 @@ class MainActivity : FlutterActivity() {
             .setMethodCallHandler { call, result ->
                 when (call.method) {
                     "scheduleStart" -> {
-                        val alarmId = call.argument<Int>("alarmId") ?: 0
+                        val alarmId       = call.argument<Int>("alarmId")        ?: 0
                         val startAtMillis = call.argument<Long>("startAtMillis") ?: 0L
-                        val message = call.argument<String>("message") ?: ""
-                        scheduleTtsAlarm(alarmId, startAtMillis, message)
+                        val message       = call.argument<String>("message")     ?: ""
+                        val payload       = call.argument<String>("payload")     ?: ""
+                        scheduleTtsAlarm(alarmId, startAtMillis, message, payload)
                         result.success(null)
                     }
                     "cancelAlarm" -> {
@@ -36,7 +39,6 @@ class MainActivity : FlutterActivity() {
                         result.success(null)
                     }
                     "start" -> {
-                        // Optional foreground start
                         val message = call.argument<String>("message") ?: ""
                         startTtsService(message)
                         result.success(null)
@@ -46,53 +48,34 @@ class MainActivity : FlutterActivity() {
             }
     }
 
-    private fun scheduleTtsAlarm(alarmId: Int, startAtMillis: Long, message: String) {
-        val context = this
-        val alarmManager = context.getSystemService(Context.ALARM_SERVICE) as AlarmManager
-
-        val intent = Intent(context, TtsAlarmReceiver::class.java).apply {
+    private fun scheduleTtsAlarm(alarmId: Int, startAtMillis: Long, message: String, payload: String) {
+        val alarmManager = getSystemService(Context.ALARM_SERVICE) as AlarmManager
+        val intent = Intent(this, TtsAlarmReceiver::class.java).apply {
             putExtra("alarmId", alarmId)
             putExtra("message", message)
+            putExtra("payload", payload)
         }
-
-        val flags = pendingIntentFlags()
         val pendingIntent = PendingIntent.getBroadcast(
-            context,
-            alarmId,
-            intent,
-            flags
+            this, alarmId, intent, pendingIntentFlags()
         )
-
-        val triggerAtMillis = startAtMillis
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
             alarmManager.setExactAndAllowWhileIdle(
-                AlarmManager.RTC_WAKEUP,
-                triggerAtMillis,
-                pendingIntent
+                AlarmManager.RTC_WAKEUP, startAtMillis, pendingIntent
             )
         } else {
             alarmManager.setExact(
-                AlarmManager.RTC_WAKEUP,
-                triggerAtMillis,
-                pendingIntent
+                AlarmManager.RTC_WAKEUP, startAtMillis, pendingIntent
             )
         }
     }
 
     private fun cancelTtsAlarm(alarmId: Int) {
-        val context = this
+        val context      = this
         val alarmManager = context.getSystemService(Context.ALARM_SERVICE) as AlarmManager
-
-        val intent = Intent(context, TtsAlarmReceiver::class.java)
-        val flags = pendingIntentFlags()
-        val pendingIntent = PendingIntent.getBroadcast(
-            context,
-            alarmId,
-            intent,
-            flags
-        )
-
+        val intent       = Intent(context, TtsAlarmReceiver::class.java)
+        val flags        = pendingIntentFlags()
+        val pendingIntent = PendingIntent.getBroadcast(context, alarmId, intent, flags)
         alarmManager.cancel(pendingIntent)
     }
 

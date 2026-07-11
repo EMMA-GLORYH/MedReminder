@@ -1,8 +1,8 @@
 // lib/services/auth_service.dart
 
 import 'package:supabase_flutter/supabase_flutter.dart';
-import '../main.dart';
-import '../models/profile.dart';
+import 'package:mar/main.dart';
+import 'package:mar/models/profile.dart';
 
 class AuthService {
   // ── Singleton Setup ──
@@ -24,7 +24,7 @@ class AuthService {
     required String email,
     required String password,
     required String fullName,
-    required String role,
+    String? role,
     String? phoneNumber,
     String timezone = 'UTC',
   }) async {

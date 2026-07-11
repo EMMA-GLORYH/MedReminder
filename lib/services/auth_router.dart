@@ -2,11 +2,13 @@
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
-import '../auth/login_screen.dart';
-import '../auth/onboarding_screen.dart';
-import '../home/patient_home_screen.dart';
-import '../home/caretaker_home_screen.dart';
-import 'auth_service.dart';
+
+// ✅ FIXED: Normalized package path imports to solve Windows path-case duplicates
+import 'package:mar/auth/login_screen.dart';
+import 'package:mar/auth/onboarding_screen.dart';
+import 'package:mar/home/patient_home_screen.dart';
+import 'package:mar/home/caretaker_home_screen.dart';
+import 'package:mar/services/auth_service.dart';
 
 class AuthRouter {
   AuthRouter._();
@@ -42,17 +44,20 @@ class AuthRouter {
         return const OnboardingScreen();
       }
 
-      if (profile.isPatient) {
+      // ✅ FIXED: Safely fallback to an empty string if profile.role is null
+      final role = (profile.role ?? '').toLowerCase().trim();
+
+      if (role == 'patient') {
         debugPrint('➡️ AuthRouter: Patient → PatientHomeScreen');
         return const PatientHomeScreen();
       }
 
-      if (profile.isCaretaker) {
+      if (role == 'caretaker' || role == 'caregiver' || profile.isCaretaker) {
         debugPrint('➡️ AuthRouter: Caretaker → CaretakerHomeScreen');
         return const CaretakerHomeScreen();
       }
 
-      debugPrint('⚠️ AuthRouter: Unknown role → OnboardingScreen');
+      debugPrint('⚠️ AuthRouter: Unknown role "$role" → OnboardingScreen');
       return const OnboardingScreen();
     } catch (e, stack) {
       debugPrint('❌ AuthRouter ERROR: $e');

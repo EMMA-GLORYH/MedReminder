@@ -28,6 +28,8 @@ environment:
 # the latest version available on pub.dev. To see which dependencies have newer
 # versions available, run `flutter pub outdated`.
 dependencies:
+  flutter_localizations:
+    sdk: flutter
   flutter:
     sdk: flutter
   flutter_svg: ^2.0.10+1
@@ -51,6 +53,8 @@ dependencies:
 #  flutter_tts: ^4.0.2
   image: ^4.2.0
   http: ^1.2.2
+
+
 
 dev_dependencies:
   flutter_test:

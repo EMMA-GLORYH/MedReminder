@@ -144,7 +144,7 @@ class _LoginScreenState extends State<LoginScreen> {
                 const SizedBox(height: 32),
 
                 Text(
-                  'Welcome Back',
+                  'Welcome',
                   style: AppTextStyles.displayMedium,
                   textAlign: TextAlign.center,
                 ),

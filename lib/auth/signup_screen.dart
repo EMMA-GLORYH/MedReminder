@@ -2,7 +2,6 @@
 
 import 'package:flutter/material.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
-import '../services/auth_router.dart';
 import '../services/auth_service.dart';
 import '../theme/app_colors.dart';
 import '../theme/app_text_styles.dart';
@@ -18,13 +17,12 @@ class SignupScreen extends StatefulWidget {
 }
 
 class _SignupScreenState extends State<SignupScreen> {
-  final _formKey = GlobalKey<FormState>();
-  final _nameController = TextEditingController();
-  final _emailController = TextEditingController();
-  final _phoneController = TextEditingController();
+  final _formKey          = GlobalKey<FormState>();
+  final _nameController   = TextEditingController();
+  final _emailController  = TextEditingController();
+  final _phoneController  = TextEditingController();
   final _passwordController = TextEditingController();
 
-  String _selectedRole = 'patient';
   bool _isLoading = false;
 
   @override
@@ -37,41 +35,31 @@ class _SignupScreenState extends State<SignupScreen> {
   }
 
   Future<void> _handleSignup() async {
-    // ── Step 1: Validate form ──
     if (!_formKey.currentState!.validate()) return;
-
-    // ── Step 2: Show loading on the button ──
     setState(() => _isLoading = true);
 
     try {
-      // ── Step 3: Create account in Supabase ──
-      // The database trigger auto-creates a profile row
-      // with the role we selected here
+      // Sign up — NO role passed here.
+      // The DB trigger creates the profile with null role.
+      // Role is collected on the OnboardingScreen after email verification.
       await AuthService.instance.signUpWithEmail(
-        email: _emailController.text.trim(),
-        password: _passwordController.text,
-        fullName: _nameController.text.trim(),
-        role: _selectedRole,
+        email:       _emailController.text.trim(),
+        password:    _passwordController.text,
+        fullName:    _nameController.text.trim(),
         phoneNumber: _phoneController.text.trim(),
+        role:        null,
       );
 
       if (!mounted) return;
 
-      // ── Step 4: Show success feedback ──
-      AppSnackbar.success(context, 'Account created successfully!');
-
-      // ── Step 5: Route to the right home based on selected role ──
-      // Patient   → PatientHomeScreen
-      // Caretaker → CaretakerHomeScreen
-      await AuthRouter.routeAfterAuth(context);
+      // Show email-verification notice instead of routing immediately
+      _showVerificationDialog();
     } on AuthException catch (e) {
-      // ── Signup error (email taken, invalid, etc.) ──
       if (mounted) {
         AppSnackbar.error(context, _friendlyError(e.message));
         setState(() => _isLoading = false);
       }
     } catch (e) {
-      // ── Network or unexpected error ──
       if (mounted) {
         AppSnackbar.error(context, 'Something went wrong. Please try again.');
         setState(() => _isLoading = false);
@@ -81,11 +69,9 @@ class _SignupScreenState extends State<SignupScreen> {
 
   Future<void> _handleGoogleSignup() async {
     setState(() => _isLoading = true);
-
     try {
       await AuthService.instance.signInWithGoogle();
-      // Google OAuth handles routing via redirect
-      // New Google users will land on OnboardingScreen to pick their role
+      // Google OAuth → redirect → SplashScreen → AuthRouter → OnboardingScreen
     } catch (e) {
       if (mounted) {
         AppSnackbar.error(context, 'Google sign-up failed. Please try again.');
@@ -94,112 +80,150 @@ class _SignupScreenState extends State<SignupScreen> {
     }
   }
 
-  /// Convert Supabase errors into friendly messages
+  void _showVerificationDialog() {
+    showDialog(
+      context:             context,
+      barrierDismissible: false,
+      builder: (ctx) => AlertDialog(
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
+        backgroundColor: AppColors.surface,
+        icon: const Icon(Icons.mark_email_read_rounded,
+            size: 52, color: AppColors.primary),
+        title: const Text('Verify your email',
+            textAlign: TextAlign.center),
+        content: Text(
+          'We sent a confirmation link to\n'
+              '${_emailController.text.trim()}\n\n'
+              'Click the link in your email, then come back and sign in.',
+          textAlign:  TextAlign.center,
+          style: AppTextStyles.bodyMedium
+              .copyWith(color: AppColors.textSecondary),
+        ),
+        actionsAlignment: MainAxisAlignment.center,
+        actions: [
+          ElevatedButton(
+            style: ElevatedButton.styleFrom(
+              backgroundColor: AppColors.primary,
+              foregroundColor: Colors.white,
+              shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(12)),
+              minimumSize: const Size(160, 48),
+            ),
+            onPressed: () {
+              Navigator.of(ctx).pop();
+              Navigator.of(context).pop(); // back to LoginScreen
+            },
+            child: const Text('Go to Sign In'),
+          ),
+        ],
+      ),
+    );
+  }
+
   String _friendlyError(String message) {
-    final lower = message.toLowerCase();
-    if (lower.contains('already registered') ||
-        lower.contains('user already')) {
+    final l = message.toLowerCase();
+    if (l.contains('already registered') || l.contains('user already')) {
       return 'This email is already registered. Try signing in instead.';
     }
-    if (lower.contains('password')) {
-      return 'Password must be at least 6 characters.';
-    }
-    if (lower.contains('invalid') && lower.contains('email')) {
+    if (l.contains('password')) return 'Password must be at least 6 characters.';
+    if (l.contains('invalid') && l.contains('email')) {
       return 'Please enter a valid email address.';
     }
-    if (lower.contains('network')) {
-      return 'No internet connection.';
-    }
+    if (l.contains('network')) return 'No internet connection.';
     return message;
   }
 
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: AppBar(title: const Text('Create Account')),
+      backgroundColor: AppColors.background,
+      appBar: AppBar(
+        backgroundColor: Colors.transparent,
+        elevation:       0,
+        title: Text('Create Account', style: AppTextStyles.titleMedium),
+        centerTitle: true,
+      ),
       body: SafeArea(
         child: SingleChildScrollView(
-          padding: const EdgeInsets.all(24),
+          padding: const EdgeInsets.fromLTRB(24, 8, 24, 32),
           child: Form(
             key: _formKey,
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.stretch,
               children: [
-                const SizedBox(height: 8),
-
-                Text('I am a...', style: AppTextStyles.titleMedium),
-                const SizedBox(height: 12),
-                Row(
-                  children: [
-                    Expanded(
-                      child: _RoleCard(
-                        label: 'Patient',
-                        icon: Icons.personal_injury_outlined,
-                        selected: _selectedRole == 'patient',
-                        onTap: () => setState(() => _selectedRole = 'patient'),
-                      ),
+                // ── Icon ──
+                Center(
+                  child: Container(
+                    padding: const EdgeInsets.all(20),
+                    decoration: BoxDecoration(
+                      color: AppColors.primary.withValues(alpha: 0.12),
+                      shape: BoxShape.circle,
                     ),
-                    const SizedBox(width: 12),
-                    Expanded(
-                      child: _RoleCard(
-                        label: 'Caretaker',
-                        icon: Icons.favorite_outline,
-                        selected: _selectedRole == 'caretaker',
-                        onTap: () =>
-                            setState(() => _selectedRole = 'caretaker'),
-                      ),
-                    ),
-                  ],
+                    child: const Icon(Icons.medication_rounded,
+                        size: 44, color: AppColors.primary),
+                  ),
                 ),
 
-                const SizedBox(height: 24),
+                const SizedBox(height: 20),
 
+                Text(
+                  'Join MedReminder',
+                  style:     AppTextStyles.displayMedium,
+                  textAlign: TextAlign.center,
+                ),
+                const SizedBox(height: 6),
+                Text(
+                  'Create your account to get started',
+                  style: AppTextStyles.bodyMedium
+                      .copyWith(color: AppColors.textSecondary),
+                  textAlign: TextAlign.center,
+                ),
+
+                const SizedBox(height: 32),
+
+                // ── Fields ──
                 AppTextField(
                   controller: _nameController,
-                  label: 'Full Name',
-                  hint: 'John Doe',
+                  label:      'Full Name',
+                  hint:       'John Doe',
                   prefixIcon: Icons.person_outline,
-                  validator: (v) => v == null || v.trim().isEmpty
-                      ? 'Name is required'
-                      : null,
+                  validator:  (v) => v == null || v.trim().isEmpty
+                      ? 'Name is required' : null,
                 ),
 
-                const SizedBox(height: 16),
+                const SizedBox(height: 14),
 
                 AppTextField(
-                  controller: _emailController,
-                  label: 'Email',
-                  hint: 'name1@example.com',
-                  prefixIcon: Icons.email_outlined,
+                  controller:   _emailController,
+                  label:        'Email',
+                  hint:         'name@example.com',
+                  prefixIcon:   Icons.email_outlined,
                   keyboardType: TextInputType.emailAddress,
                   validator: (v) {
-                    if (v == null || v.trim().isEmpty) {
-                      return 'Email is required';
-                    }
+                    if (v == null || v.trim().isEmpty) return 'Email is required';
                     if (!v.contains('@')) return 'Invalid email';
                     return null;
                   },
                 ),
 
-                const SizedBox(height: 16),
+                const SizedBox(height: 14),
 
                 AppTextField(
-                  controller: _phoneController,
-                  label: 'Phone Number',
-                  hint: '+1234567890',
-                  prefixIcon: Icons.phone_outlined,
+                  controller:   _phoneController,
+                  label:        'Phone Number',
+                  hint:         '+233 XX XXX XXXX',
+                  prefixIcon:   Icons.phone_outlined,
                   keyboardType: TextInputType.phone,
-                  validator: (v) => v == null || v.trim().isEmpty
-                      ? 'Phone is required for alerts'
-                      : null,
+                  validator:    (v) => v == null || v.trim().isEmpty
+                      ? 'Phone is required for alerts' : null,
                 ),
 
-                const SizedBox(height: 16),
+                const SizedBox(height: 14),
 
                 AppTextField(
                   controller: _passwordController,
-                  label: 'Password',
-                  hint: 'Minimum 6 characters',
+                  label:      'Password',
+                  hint:       'Minimum 6 characters',
                   prefixIcon: Icons.lock_outline,
                   isPassword: true,
                   validator: (v) {
@@ -209,94 +233,65 @@ class _SignupScreenState extends State<SignupScreen> {
                   },
                 ),
 
-                const SizedBox(height: 24),
+                const SizedBox(height: 6),
 
-                // ── Button shows loading state ──
+                // Role hint — let user know role is chosen next
+                Container(
+                  padding: const EdgeInsets.symmetric(
+                      horizontal: 14, vertical: 10),
+                  decoration: BoxDecoration(
+                    color:        AppColors.primary.withValues(alpha: 0.08),
+                    borderRadius: BorderRadius.circular(10),
+                    border: Border.all(
+                        color: AppColors.primary.withValues(alpha: 0.2)),
+                  ),
+                  child: Row(
+                    children: [
+                      Icon(Icons.info_outline_rounded,
+                          size: 16, color: AppColors.primary),
+                      const SizedBox(width: 8),
+                      Expanded(
+                        child: Text(
+                          'You\'ll choose your role (Patient / Caretaker) '
+                              'after verifying your email.',
+                          style: AppTextStyles.bodySmall
+                              .copyWith(color: AppColors.primary),
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+
+                const SizedBox(height: 28),
+
                 AppButton(
-                  label: 'Create Account',
+                  label:     'Create Account',
                   isLoading: _isLoading,
                   onPressed: _handleSignup,
                 ),
 
-                const SizedBox(height: 16),
+                const SizedBox(height: 20),
 
-                Row(
-                  children: [
-                    const Expanded(child: Divider()),
-                    Padding(
-                      padding: const EdgeInsets.symmetric(horizontal: 16),
-                      child: Text('OR', style: AppTextStyles.labelSmall),
-                    ),
-                    const Expanded(child: Divider()),
-                  ],
-                ),
+                Row(children: [
+                  const Expanded(child: Divider()),
+                  Padding(
+                    padding: const EdgeInsets.symmetric(horizontal: 14),
+                    child: Text('OR', style: AppTextStyles.labelSmall),
+                  ),
+                  const Expanded(child: Divider()),
+                ]),
 
-                const SizedBox(height: 16),
+                const SizedBox(height: 20),
 
                 AppButton(
-                  label: 'Sign up with Google',
-                  icon: Icons.g_mobiledata,
-                  variant: AppButtonVariant.outline,
+                  label:     'Sign up with Google',
+                  icon:      Icons.g_mobiledata,
+                  variant:   AppButtonVariant.outline,
                   onPressed: _isLoading ? null : _handleGoogleSignup,
                 ),
-
-                const SizedBox(height: 24),
               ],
             ),
           ),
-        ),
-      ),
-    );
-  }
-}
-
-// ── Role Selection Card ──
-class _RoleCard extends StatelessWidget {
-  final String label;
-  final IconData icon;
-  final bool selected;
-  final VoidCallback onTap;
-
-  const _RoleCard({
-    required this.label,
-    required this.icon,
-    required this.selected,
-    required this.onTap,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    return InkWell(
-      onTap: onTap,
-      borderRadius: BorderRadius.circular(12),
-      child: AnimatedContainer(
-        duration: const Duration(milliseconds: 200),
-        padding: const EdgeInsets.symmetric(vertical: 20),
-        decoration: BoxDecoration(
-          color: selected
-              ? AppColors.primary.withValues(alpha: 0.15)
-              : AppColors.surface,
-          border: Border.all(
-            color: selected ? AppColors.primary : AppColors.border,
-            width: selected ? 2 : 1,
-          ),
-          borderRadius: BorderRadius.circular(12),
-        ),
-        child: Column(
-          children: [
-            Icon(
-              icon,
-              size: 32,
-              color: selected ? AppColors.secondary : AppColors.textSecondary,
-            ),
-            const SizedBox(height: 8),
-            Text(
-              label,
-              style: AppTextStyles.titleSmall.copyWith(
-                color: selected ? AppColors.secondary : AppColors.textPrimary,
-              ),
-            ),
-          ],
         ),
       ),
     );

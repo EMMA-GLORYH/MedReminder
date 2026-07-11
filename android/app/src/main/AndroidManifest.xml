@@ -1,6 +1,5 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
-    <!-- Required for local notifications to work when app is closed -->
     <uses-feature
         android:name="android.hardware.camera"
         android:required="false" />
@@ -13,15 +12,18 @@
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS"/>
     <uses-permission android:name="android.permission.CAMERA"/>
 
-    <!-- ✅ Required for TTS ForegroundService -->
+    <!-- Required (API 34+) for any notification/alarm that auto-launches
+         an Activity over the lock screen without the user tapping it -->
+    <uses-permission android:name="android.permission.USE_FULL_SCREEN_INTENT"/>
+
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE"/>
-    <!-- Android 14+ (safe to include): -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK"/>
 
     <application
         android:label="mar"
         android:name="${applicationName}"
         android:icon="@mipmap/ic_launcher">
+        android:enableOnBackInvokedCallback="true">
 
         <activity
             android:name=".MainActivity"
@@ -31,10 +33,9 @@
             android:theme="@style/LaunchTheme"
             android:configChanges="orientation|keyboardHidden|keyboard|screenSize|smallestScreenSize|locale|layoutDirection|fontScale|screenLayout|density|uiMode"
             android:hardwareAccelerated="true"
-            android:windowSoftInputMode="adjustResize">
-            android:showOnLockScreen="true"
-            android:turnScreenOn="true"
+            android:windowSoftInputMode="adjustResize"
             android:showWhenLocked="true"
+            android:turnScreenOn="true">
 
             <meta-data
                 android:name="io.flutter.embedding.android.NormalTheme"
@@ -47,13 +48,10 @@
             </intent-filter>
         </activity>
 
-        <!-- Don't delete the meta-data below.
-             This is used by the Flutter tool to generate GeneratedPluginRegistrant.java -->
         <meta-data
             android:name="flutterEmbedding"
             android:value="2" />
 
-        <!-- ✅ Receivers for local notifications (survives app close & reboot) -->
         <receiver
             android:exported="false"
             android:name="com.dexterous.flutterlocalnotifications.ScheduledNotificationReceiver" />
@@ -73,12 +71,10 @@
             android:exported="false"
             android:name="com.dexterous.flutterlocalnotifications.ActionBroadcastReceiver" />
 
-        <!-- ✅ TTS auto-start receiver (from our AlarmManager PendingIntent) -->
         <receiver
             android:exported="false"
             android:name=".TtsAlarmReceiver" />
 
-        <!-- ✅ Foreground service that speaks repeatedly -->
         <service
             android:exported="false"
             android:name=".TtsSpeakService"

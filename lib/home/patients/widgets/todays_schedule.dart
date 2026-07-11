@@ -1,19 +1,23 @@
 // lib/screens/home/patients/widgets/todays_schedule.dart
 
 import 'package:flutter/material.dart';
+
+import '../../../localization/app_localizations.dart';
 import '../../../services/dose_log_service.dart';
 import '../../../services/schedule_service.dart';
 import '../../../theme/app_colors.dart';
 import '../../../theme/app_text_styles.dart';
 import '../../../widgets/loaders/skeleton_loader.dart';
 import '../../../widgets/snackbar/app_snackbar.dart';
+import '../medication_reminder_scanner_screen.dart';
 
 class TodaysSchedule extends StatefulWidget {
   final VoidCallback onAddPressed;
   final VoidCallback? onViewAllPressed;
 
-
-  /// This shows ALL remaining doses for today.
+  /// Kept for compatibility with existing calls.
+  ///
+  /// All remaining doses are displayed in the horizontal carousel.
   final int maxDoses;
 
   /// Fires whenever a dose is marked taken so dashboard/stat cards can update.
@@ -32,16 +36,32 @@ class TodaysSchedule extends StatefulWidget {
 }
 
 class TodaysScheduleState extends State<TodaysSchedule> {
+  final Set<String> _loggedKeys = {};
+
+  late final PageController _pageController;
+
   List<TodayDose> _allDoses = [];
-  Set<String> _loggedKeys = {};
-  final Set<String> _pendingKeys = {};
+
   bool _isLoading = true;
   String? _error;
+
+  int _currentDoseIndex = 0;
 
   @override
   void initState() {
     super.initState();
+
+    _pageController = PageController(
+      viewportFraction: 0.88,
+    );
+
     load();
+  }
+
+  @override
+  void dispose() {
+    _pageController.dispose();
+    super.dispose();
   }
 
   Future<void> load() async {
@@ -63,20 +83,35 @@ class TodaysScheduleState extends State<TodaysSchedule> {
       final doses = results[0] as List<TodayDose>;
       final loggedKeys = results[1] as Set<String>;
 
+      doses.sort(
+            (a, b) => a.scheduledTime.compareTo(b.scheduledTime),
+      );
+
+      final remainingCount = doses
+          .where((dose) => !loggedKeys.contains(_doseKey(dose)))
+          .length;
+
       if (!mounted) return;
 
       setState(() {
         _allDoses = doses;
-        _loggedKeys = loggedKeys;
 
-        // If a dose was pending and now appears in logged keys, clear pending.
-        _pendingKeys.removeWhere((key) => _loggedKeys.contains(key));
+        _loggedKeys
+          ..clear()
+          ..addAll(loggedKeys);
 
+        _normalizeCurrentIndex(remainingCount);
         _isLoading = false;
       });
 
-      debugPrint('✅ TodaysSchedule loaded ${_allDoses.length} doses');
-      debugPrint('✅ TodaysSchedule loaded ${_loggedKeys.length} logged keys');
+      _jumpToCurrentPage();
+
+      debugPrint(
+        '✅ TodaysSchedule loaded ${_allDoses.length} doses',
+      );
+      debugPrint(
+        '✅ TodaysSchedule loaded ${_loggedKeys.length} logged keys',
+      );
     } catch (e, st) {
       debugPrint('❌ TodaysSchedule.load() failed: $e');
       debugPrint('$st');
@@ -90,164 +125,125 @@ class TodaysScheduleState extends State<TodaysSchedule> {
     }
   }
 
-  // ══════════════════════════════════════════════════════════════
-  // IMPORTANT:
-  // Use LOCAL time here, not UTC.
-  //
-  // Mobile devices use local time. ScheduleService creates TodayDose
-  // times in local device time. DoseLogService should also convert DB
-  // scheduled_for back to local time before generating logged keys.
-  //
-  // This makes Web and Mobile behave the same.
-  // ══════════════════════════════════════════════════════════════
-  String _doseKey(TodayDose dose) {
-    final t = dose.scheduledTime;
-    return '${dose.scheduleId}|'
-        '${t.year}-'
-        '${t.month.toString().padLeft(2, '0')}-'
-        '${t.day.toString().padLeft(2, '0')}T'
-        '${t.hour.toString().padLeft(2, '0')}:'
-        '${t.minute.toString().padLeft(2, '0')}';
+  void _normalizeCurrentIndex(int itemCount) {
+    if (itemCount <= 0) {
+      _currentDoseIndex = 0;
+      return;
+    }
+
+    if (_currentDoseIndex >= itemCount) {
+      _currentDoseIndex = itemCount - 1;
+    }
+
+    if (_currentDoseIndex < 0) {
+      _currentDoseIndex = 0;
+    }
   }
 
-  bool _isDoseTaken(TodayDose dose) => _loggedKeys.contains(_doseKey(dose));
+  void _jumpToCurrentPage() {
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted || !_pageController.hasClients) return;
 
-  bool _isDosePending(TodayDose dose) => _pendingKeys.contains(_doseKey(dose));
+      try {
+        _pageController.jumpToPage(_currentDoseIndex);
+      } catch (_) {
+        // The PageView may have been removed after the final dose was taken.
+      }
+    });
+  }
 
-  Future<void> _confirmAndMarkTaken(TodayDose dose) async {
-    if (_isDosePending(dose)) return;
+  String _doseKey(TodayDose dose) {
+    final time = dose.scheduledTime;
 
-    final confirmed = await showDialog<bool>(
-      context: context,
-      builder: (ctx) => AlertDialog(
-        backgroundColor: AppColors.surface,
-        shape: RoundedRectangleBorder(
-          borderRadius: BorderRadius.circular(18),
+    return '${dose.scheduleId}|'
+        '${time.year}-'
+        '${time.month.toString().padLeft(2, '0')}-'
+        '${time.day.toString().padLeft(2, '0')}T'
+        '${time.hour.toString().padLeft(2, '0')}:'
+        '${time.minute.toString().padLeft(2, '0')}';
+  }
+
+  bool _isDoseTaken(TodayDose dose) {
+    return _loggedKeys.contains(_doseKey(dose));
+  }
+
+  /// A dose becomes available at its exact scheduled local time.
+  bool _isDoseDue(TodayDose dose) {
+    return !DateTime.now().isBefore(dose.scheduledTime);
+  }
+
+  String _formatTime(DateTime dateTime) {
+    final hour = dateTime.hour;
+    final minute = dateTime.minute.toString().padLeft(2, '0');
+    final period = hour >= 12 ? 'PM' : 'AM';
+    final displayHour = hour == 0 ? 12 : (hour > 12 ? hour - 12 : hour);
+
+    return '$displayHour:$minute $period';
+  }
+
+  /// A due dose opens the reminder screen.
+  ///
+  /// The reminder screen owns the mark-as-taken operation. A future dose
+  /// remains locked until its scheduled local time.
+  Future<void> _openDose(TodayDose dose) async {
+    final localization = AppLocalizations.of(context);
+
+    if (!_isDoseDue(dose)) {
+      AppSnackbar.error(
+        context,
+        localization.t(
+          'notDueSnackbar',
+          {
+            'time': _formatTime(dose.scheduledTime),
+          },
         ),
-        title: Row(
-          children: [
-            Container(
-              padding: const EdgeInsets.all(8),
-              decoration: BoxDecoration(
-                color: AppColors.primary.withValues(alpha: 0.15),
-                shape: BoxShape.circle,
-              ),
-              child: const Icon(
-                Icons.check_circle_rounded,
-                color: AppColors.primary,
-                size: 22,
-              ),
-            ),
-            const SizedBox(width: 12),
-            Expanded(
-              child: Text(
-                'Confirm Dose',
-                style: AppTextStyles.titleMedium,
-              ),
-            ),
-          ],
+      );
+      return;
+    }
+
+    final result = await Navigator.of(context).push<bool>(
+      MaterialPageRoute(
+        fullscreenDialog: true,
+        builder: (_) => MedicationReminderScannerScreen(
+          dose: dose,
         ),
-        content: Text(
-          'Mark "${dose.medicationName}" (${dose.dosageDisplay}) '
-              'scheduled for ${_formatTime(dose.scheduledTime)} as taken?',
-          style: AppTextStyles.bodyMedium,
-        ),
-        actionsPadding: const EdgeInsets.fromLTRB(16, 0, 16, 12),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(ctx, false),
-            style: TextButton.styleFrom(
-              foregroundColor: AppColors.textSecondary,
-            ),
-            child: const Text('Cancel'),
-          ),
-          ElevatedButton(
-            onPressed: () => Navigator.pop(ctx, true),
-            style: ElevatedButton.styleFrom(
-              backgroundColor: AppColors.primary,
-              foregroundColor: AppColors.secondary,
-              elevation: 0,
-              shape: RoundedRectangleBorder(
-                borderRadius: BorderRadius.circular(10),
-              ),
-            ),
-            child: const Text('Yes, Taken'),
-          ),
-        ],
       ),
     );
 
-    if (confirmed == true) {
-      await _markTaken(dose);
-    }
+    if (result != true || !mounted) return;
+
+    setState(() {
+      _loggedKeys.add(_doseKey(dose));
+
+      final remainingCount = _allDoses
+          .where((item) => !_isDoseTaken(item))
+          .length;
+
+      _normalizeCurrentIndex(remainingCount);
+    });
+
+    _jumpToCurrentPage();
+    widget.onDoseTaken?.call(dose);
   }
 
-  String _formatTime(DateTime dt) {
-    final h = dt.hour;
-    final m = dt.minute.toString().padLeft(2, '0');
-    final p = h >= 12 ? 'PM' : 'AM';
-    final dh = h == 0 ? 12 : (h > 12 ? h - 12 : h);
-    return '$dh:$m $p';
-  }
-
-  Future<void> _markTaken(TodayDose dose) async {
-    final key = _doseKey(dose);
-
-    if (mounted) {
-      setState(() => _pendingKeys.add(key));
-    }
-
-    try {
-      await DoseLogService.instance.markAsTaken(
-        scheduleId: dose.scheduleId,
-        medicationId: dose.medicationId,
-        scheduledFor: dose.scheduledTime,
-      );
-
-      debugPrint('✅ Dose log write completed for "${dose.medicationName}"');
-      debugPrint('✅ Local dose key: $key');
-
-      if (!mounted) return;
-
-      setState(() {
-        _loggedKeys.add(key);
-        _pendingKeys.remove(key);
-      });
-
-      // Fire callback BEFORE snackbar so dashboard updates immediately on mobile.
-      widget.onDoseTaken?.call(dose);
-
-      AppSnackbar.success(context, '${dose.medicationName} marked as taken ✓');
-    } catch (e, st) {
-      debugPrint('❌ Failed to mark "${dose.medicationName}" as taken: $e');
-      debugPrint('$st');
-
-      if (!mounted) return;
-
-      setState(() => _pendingKeys.remove(key));
-
-      final errorDetail = e.toString().replaceFirst('Exception: ', '');
-      final shortError = errorDetail.length > 120
-          ? '${errorDetail.substring(0, 120)}...'
-          : errorDetail;
-
-      AppSnackbar.error(context, 'Failed to log dose: $shortError');
-    }
-  }
-
-  /// Always show all today's remaining untaken doses,
-  /// sorted from first dose to take to last.
+  /// All untaken doses, sorted from the earliest to the latest.
   List<TodayDose> get _displayDoses {
-    final untaken = _allDoses.where((d) => !_isDoseTaken(d)).toList();
+    final untaken = _allDoses
+        .where((dose) => !_isDoseTaken(dose))
+        .toList();
 
-    untaken.sort((a, b) => a.scheduledTime.compareTo(b.scheduledTime));
+    untaken.sort(
+          (a, b) => a.scheduledTime.compareTo(b.scheduledTime),
+    );
 
     return untaken;
   }
 
   @override
   Widget build(BuildContext context) {
-    if (_isLoading) return const _ScheduleSkeleton();
+    if (_isLoading) {
+      return const _ScheduleSkeleton();
+    }
 
     if (_error != null) {
       return _ErrorState(
@@ -257,44 +253,100 @@ class TodaysScheduleState extends State<TodaysSchedule> {
     }
 
     if (_allDoses.isEmpty) {
-      return _EmptySchedule(onAddPressed: widget.onAddPressed);
+      return _EmptySchedule(
+        onAddPressed: widget.onAddPressed,
+      );
     }
-
-    final allTaken = _allDoses.every(_isDoseTaken);
-    if (allTaken) return _AllDoneCard(count: _allDoses.length);
 
     final displayDoses = _displayDoses;
 
+    if (displayDoses.isEmpty || _allDoses.every(_isDoseTaken)) {
+      return _AllDoneCard(
+        count: _allDoses.length,
+      );
+    }
+
     return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
-        ...displayDoses.map(
-              (dose) => Padding(
-            padding: const EdgeInsets.only(bottom: 10),
-            child: _DoseTile(
-              dose: dose,
-              isPending: _isDosePending(dose),
-              onMarkTaken: () => _confirmAndMarkTaken(dose),
-            ),
+        SizedBox(
+          height: 420,
+          child: PageView.builder(
+            controller: _pageController,
+            itemCount: displayDoses.length,
+            padEnds: false,
+            onPageChanged: (index) {
+              if (!mounted) return;
+
+              setState(() {
+                _currentDoseIndex = index;
+              });
+            },
+            itemBuilder: (context, index) {
+              final dose = displayDoses[index];
+
+              return Padding(
+                padding: EdgeInsets.only(
+                  left: index == 0 ? 0 : 6,
+                  right: 8,
+                ),
+                child: _DoseTile(
+                  dose: dose,
+                  isDue: _isDoseDue(dose),
+                  onTap: () => _openDose(dose),
+                ),
+              );
+            },
           ),
         ),
+
+        if (displayDoses.length > 1) ...[
+          const SizedBox(height: 14),
+          _CarouselIndicator(
+            itemCount: displayDoses.length,
+            currentIndex: _currentDoseIndex,
+          ),
+          const SizedBox(height: 7),
+          Text(
+            '${_currentDoseIndex + 1} of ${displayDoses.length}',
+            style: AppTextStyles.labelSmall.copyWith(
+              color: AppColors.textSecondary,
+              fontWeight: FontWeight.w600,
+            ),
+            textAlign: TextAlign.center,
+          ),
+        ],
       ],
     );
   }
 }
 
 // ══════════════════════════════════════════════════════════════
-// DOSE TILE — Bottle or Tablet based on dosage unit
+// HORIZONTAL PRODUCT-STYLE DOSE CARD
 // ══════════════════════════════════════════════════════════════
+
 class _DoseTile extends StatelessWidget {
   final TodayDose dose;
-  final bool isPending;
-  final VoidCallback onMarkTaken;
+  final bool isDue;
+  final VoidCallback onTap;
 
   const _DoseTile({
     required this.dose,
-    required this.onMarkTaken,
-    this.isPending = false,
+    required this.isDue,
+    required this.onTap,
   });
+
+  bool get _hasImage {
+    final imageUrl = dose.pillImageUrl;
+    return imageUrl != null && imageUrl.trim().isNotEmpty;
+  }
+
+  bool get _hasDifferentGenericName {
+    final medicationName = dose.medicationName.trim().toLowerCase();
+    final genericName = dose.genericName.trim().toLowerCase();
+
+    return genericName.isNotEmpty && medicationName != genericName;
+  }
 
   Color get _medColor {
     switch (dose.pillColor?.toLowerCase()) {
@@ -321,22 +373,17 @@ class _DoseTile extends StatelessWidget {
     }
   }
 
-  _MedicationForm get _form {
-    final unit = dose.dosageUnit.toLowerCase();
-
-    if (unit == 'ml') return _MedicationForm.syrup;
-    if (unit == 'tablets') return _MedicationForm.tablet;
-    if (unit == 'units') return _MedicationForm.injection;
-
-    return _MedicationForm.bottle;
-  }
-
-  String get _timeText {
-    final h = dose.scheduledTime.hour;
-    final m = dose.scheduledTime.minute.toString().padLeft(2, '0');
-    final p = h >= 12 ? 'PM' : 'AM';
-    final dh = h == 0 ? 12 : (h > 12 ? h - 12 : h);
-    return '$dh:$m $p';
+  IconData get _fallbackIcon {
+    switch (dose.dosageUnit.toLowerCase()) {
+      case 'ml':
+        return Icons.medication_liquid_rounded;
+      case 'units':
+        return Icons.vaccines_rounded;
+      case 'tablets':
+        return Icons.medication_rounded;
+      default:
+        return Icons.medication_rounded;
+    }
   }
 
   Color get _statusColor {
@@ -345,168 +392,432 @@ class _DoseTile extends StatelessWidget {
     return AppColors.primary;
   }
 
-  String get _statusLabel {
-    if (dose.isPast) return 'Overdue';
-    if (dose.isDueSoon) return 'Due Soon';
-    return 'Upcoming';
+  String _statusLabel(AppLocalizations localization) {
+    if (dose.isPast) return localization.t('overdue');
+    if (dose.isDueSoon) return localization.t('dueSoon');
+    return localization.t('upcoming');
+  }
+
+  String get _timeText {
+    final hour = dose.scheduledTime.hour;
+    final minute = dose.scheduledTime.minute.toString().padLeft(2, '0');
+    final period = hour >= 12 ? 'PM' : 'AM';
+    final displayHour = hour == 0 ? 12 : (hour > 12 ? hour - 12 : hour);
+
+    return '$displayHour:$minute $period';
   }
 
   @override
   Widget build(BuildContext context) {
-    return Container(
-      padding: const EdgeInsets.all(14),
-      decoration: BoxDecoration(
-        color: AppColors.surface,
-        borderRadius: BorderRadius.circular(16),
-        border: Border.all(
-          color: dose.isPast
-              ? AppColors.error.withValues(alpha: 0.3)
-              : dose.isDueSoon
-              ? AppColors.warning.withValues(alpha: 0.4)
-              : AppColors.border,
-        ),
-      ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: [
-          Row(
+    final localization = AppLocalizations.of(context);
+
+    return Material(
+      color: AppColors.surface,
+      elevation: isDue ? 3 : 1,
+      shadowColor: Colors.black.withValues(alpha: 0.10),
+      borderRadius: BorderRadius.circular(18),
+      clipBehavior: Clip.antiAlias,
+      child: InkWell(
+        onTap: onTap,
+        child: Container(
+          decoration: BoxDecoration(
+            borderRadius: BorderRadius.circular(18),
+            border: Border.all(
+              color: dose.isPast
+                  ? AppColors.error.withValues(alpha: 0.35)
+                  : dose.isDueSoon
+                  ? AppColors.warning.withValues(alpha: 0.45)
+                  : AppColors.border,
+            ),
+          ),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
-              Container(
-                width: 4,
-                height: 56,
-                decoration: BoxDecoration(
-                  color: _statusColor,
-                  borderRadius: BorderRadius.circular(2),
-                ),
-              ),
-              const SizedBox(width: 12),
-              _MedicationVisual(
-                form: _form,
-                color: _medColor,
-              ),
-              const SizedBox(width: 14),
-              Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
+              // ────────────────────────────────────────────────
+              // LARGE MEDICINE IMAGE
+              // ────────────────────────────────────────────────
+              SizedBox(
+                height: 220,
+                child: Stack(
+                  fit: StackFit.expand,
                   children: [
-                    Text(
-                      dose.medicationName,
-                      style: AppTextStyles.titleSmall,
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
+                    _DoseImage(
+                      imageUrl: dose.pillImageUrl,
+                      fallbackColor: _medColor,
+                      fallbackIcon: _fallbackIcon,
                     ),
-                    const SizedBox(height: 2),
-                    Text(
-                      dose.dosageDisplay,
-                      style: AppTextStyles.bodySmall.copyWith(
-                        color: AppColors.secondary,
-                        fontWeight: FontWeight.w600,
+
+                    // Subtle gradient gives the image more depth.
+                    Positioned.fill(
+                      child: IgnorePointer(
+                        child: DecoratedBox(
+                          decoration: BoxDecoration(
+                            gradient: LinearGradient(
+                              begin: Alignment.topCenter,
+                              end: Alignment.bottomCenter,
+                              colors: [
+                                Colors.black.withValues(alpha: 0.03),
+                                Colors.transparent,
+                                Colors.black.withValues(alpha: 0.22),
+                              ],
+                            ),
+                          ),
+                        ),
+                      ),
+                    ),
+
+                    Positioned(
+                      top: 12,
+                      left: 12,
+                      child: _DoseStatusBadge(
+                        label: _statusLabel(localization),
+                        color: _statusColor,
+                      ),
+                    ),
+
+                    Positioned(
+                      top: 12,
+                      right: 12,
+                      child: Container(
+                        width: 34,
+                        height: 34,
+                        decoration: BoxDecoration(
+                          color: Colors.white.withValues(alpha: 0.90),
+                          shape: BoxShape.circle,
+                          boxShadow: [
+                            BoxShadow(
+                              color: Colors.black.withValues(alpha: 0.10),
+                              blurRadius: 6,
+                              offset: const Offset(0, 2),
+                            ),
+                          ],
+                        ),
+                        child: Icon(
+                          _hasImage
+                              ? Icons.image_rounded
+                              : Icons.medication_rounded,
+                          size: 18,
+                          color: AppColors.secondary,
+                        ),
                       ),
                     ),
                   ],
                 ),
               ),
-              Column(
-                crossAxisAlignment: CrossAxisAlignment.end,
-                children: [
-                  Text(
-                    _timeText,
-                    style: AppTextStyles.titleSmall.copyWith(
-                      color: AppColors.secondary,
-                    ),
-                  ),
-                  const SizedBox(height: 2),
-                  Container(
-                    padding: const EdgeInsets.symmetric(
-                      horizontal: 8,
-                      vertical: 2,
-                    ),
-                    decoration: BoxDecoration(
-                      color: _statusColor.withValues(alpha: 0.15),
-                      borderRadius: BorderRadius.circular(8),
-                    ),
-                    child: Text(
-                      _statusLabel,
-                      style: AppTextStyles.labelSmall.copyWith(
-                        color: _statusColor,
-                        fontSize: 10,
+
+              // ────────────────────────────────────────────────
+              // MEDICATION INFORMATION
+              // ────────────────────────────────────────────────
+              Expanded(
+                child: Padding(
+                  padding: const EdgeInsets.fromLTRB(16, 14, 16, 6),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        dose.medicationName,
+                        style: AppTextStyles.titleMedium.copyWith(
+                          fontWeight: FontWeight.w800,
+                        ),
+                        maxLines: 2,
+                        overflow: TextOverflow.ellipsis,
                       ),
+
+                      if (_hasDifferentGenericName) ...[
+                        const SizedBox(height: 3),
+                        Text(
+                          dose.genericName,
+                          style: AppTextStyles.bodySmall.copyWith(
+                            color: AppColors.textSecondary,
+                          ),
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                        ),
+                      ],
+
+                      const Spacer(),
+
+                      Row(
+                        children: [
+                          Expanded(
+                            child: Text(
+                              dose.dosageDisplay,
+                              style: AppTextStyles.titleMedium.copyWith(
+                                color: AppColors.secondary,
+                                fontWeight: FontWeight.w800,
+                              ),
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                            ),
+                          ),
+                          const SizedBox(width: 8),
+                          const Icon(
+                            Icons.access_time_rounded,
+                            size: 16,
+                            color: AppColors.textSecondary,
+                          ),
+                          const SizedBox(width: 4),
+                          Text(
+                            _timeText,
+                            style: AppTextStyles.bodySmall.copyWith(
+                              color: AppColors.textSecondary,
+                              fontWeight: FontWeight.w700,
+                            ),
+                          ),
+                        ],
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+
+              // ────────────────────────────────────────────────
+              // DUE/LOCKED ACTION AREA
+              // ────────────────────────────────────────────────
+              Padding(
+                padding: const EdgeInsets.fromLTRB(16, 8, 16, 14),
+                child: Container(
+                  height: 42,
+                  padding: const EdgeInsets.symmetric(horizontal: 12),
+                  decoration: BoxDecoration(
+                    color: isDue
+                        ? AppColors.primary.withValues(alpha: 0.13)
+                        : AppColors.surfaceVariant,
+                    borderRadius: BorderRadius.circular(12),
+                    border: Border.all(
+                      color: isDue
+                          ? AppColors.primary.withValues(alpha: 0.28)
+                          : AppColors.border,
                     ),
                   ),
-                ],
+                  child: Row(
+                    mainAxisAlignment: MainAxisAlignment.center,
+                    children: [
+                      Icon(
+                        isDue
+                            ? Icons.touch_app_rounded
+                            : Icons.lock_clock_rounded,
+                        size: 17,
+                        color: isDue
+                            ? AppColors.primary
+                            : AppColors.textSecondary,
+                      ),
+                      const SizedBox(width: 7),
+                      Flexible(
+                        child: Text(
+                          isDue
+                              ? localization.t('tapToMarkTaken')
+                              : localization.t(
+                            'availableAt',
+                            {
+                              'time': _timeText,
+                            },
+                          ),
+                          style: AppTextStyles.bodySmall.copyWith(
+                            color: isDue
+                                ? AppColors.primary
+                                : AppColors.textSecondary,
+                            fontWeight: FontWeight.w700,
+                          ),
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          textAlign: TextAlign.center,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
               ),
             ],
           ),
-          const SizedBox(height: 12),
-          SizedBox(
-            width: double.infinity,
-            height: 42,
-            child: ElevatedButton.icon(
-              onPressed: isPending ? null : onMarkTaken,
-              style: ElevatedButton.styleFrom(
-                backgroundColor: AppColors.primary,
-                foregroundColor: AppColors.secondary,
-                disabledBackgroundColor:
-                AppColors.primary.withValues(alpha: 0.5),
-                elevation: 0,
-                shape: RoundedRectangleBorder(
-                  borderRadius: BorderRadius.circular(10),
-                ),
-              ),
-              icon: isPending
-                  ? const SizedBox(
-                width: 16,
-                height: 16,
-                child: CircularProgressIndicator(
-                  strokeWidth: 2,
-                  color: AppColors.secondary,
-                ),
-              )
-                  : const Icon(Icons.check_circle_rounded, size: 18),
-              label: Text(
-                isPending ? 'Logging...' : 'Mark as Taken',
-                style: AppTextStyles.bodyMedium.copyWith(
-                  fontWeight: FontWeight.w700,
-                  color: AppColors.secondary,
-                ),
-              ),
-            ),
-          ),
-        ],
+        ),
       ),
     );
   }
 }
 
 // ══════════════════════════════════════════════════════════════
-// MEDICATION FORM ENUM
+// MEDICATION IMAGE
 // ══════════════════════════════════════════════════════════════
-enum _MedicationForm { bottle, tablet, syrup, injection }
 
-// ══════════════════════════════════════════════════════════════
-// MEDICATION VISUAL DISPATCHER
-// ══════════════════════════════════════════════════════════════
-class _MedicationVisual extends StatelessWidget {
-  final _MedicationForm form;
+class _DoseImage extends StatelessWidget {
+  final String? imageUrl;
+  final Color fallbackColor;
+  final IconData fallbackIcon;
+
+  const _DoseImage({
+    required this.imageUrl,
+    required this.fallbackColor,
+    required this.fallbackIcon,
+  });
+
+  bool get _hasImage {
+    return imageUrl != null && imageUrl!.trim().isNotEmpty;
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    if (!_hasImage) {
+      return _FallbackDoseImage(
+        color: fallbackColor,
+        icon: fallbackIcon,
+      );
+    }
+
+    return Image.network(
+      imageUrl!,
+      fit: BoxFit.cover,
+      filterQuality: FilterQuality.medium,
+      gaplessPlayback: true,
+      loadingBuilder: (context, child, progress) {
+        if (progress == null) return child;
+
+        return Container(
+          color: AppColors.surfaceVariant,
+          child: const Center(
+            child: SizedBox(
+              width: 28,
+              height: 28,
+              child: CircularProgressIndicator(
+                strokeWidth: 2.5,
+                color: AppColors.primary,
+              ),
+            ),
+          ),
+        );
+      },
+      errorBuilder: (_, __, ___) {
+        return _FallbackDoseImage(
+          color: fallbackColor,
+          icon: fallbackIcon,
+        );
+      },
+    );
+  }
+}
+
+class _FallbackDoseImage extends StatelessWidget {
+  final Color color;
+  final IconData icon;
+
+  const _FallbackDoseImage({
+    required this.color,
+    required this.icon,
+  });
+
+  bool get _isLight {
+    return color == Colors.white ||
+        color == Colors.yellow ||
+        color == const Color(0xFFFFC107);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return DecoratedBox(
+      decoration: BoxDecoration(
+        gradient: LinearGradient(
+          begin: Alignment.topLeft,
+          end: Alignment.bottomRight,
+          colors: [
+            _lighten(color, 0.10),
+            color,
+            _darken(color, 0.10),
+          ],
+        ),
+      ),
+      child: Center(
+        child: Icon(
+          icon,
+          size: 76,
+          color: _isLight ? AppColors.secondary : Colors.white,
+        ),
+      ),
+    );
+  }
+}
+
+class _DoseStatusBadge extends StatelessWidget {
+  final String label;
   final Color color;
 
-  const _MedicationVisual({
-    required this.form,
+  const _DoseStatusBadge({
+    required this.label,
     required this.color,
   });
 
   @override
   Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.symmetric(
+        horizontal: 10,
+        vertical: 6,
+      ),
+      decoration: BoxDecoration(
+        color: color.withValues(alpha: 0.94),
+        borderRadius: BorderRadius.circular(10),
+        boxShadow: [
+          BoxShadow(
+            color: Colors.black.withValues(alpha: 0.15),
+            blurRadius: 6,
+            offset: const Offset(0, 2),
+          ),
+        ],
+      ),
+      child: Text(
+        label,
+        style: AppTextStyles.labelSmall.copyWith(
+          color: Colors.white,
+          fontWeight: FontWeight.w800,
+          fontSize: 10,
+        ),
+      ),
+    );
+  }
+}
+
+// ══════════════════════════════════════════════════════════════
+// CAROUSEL INDICATOR
+// ══════════════════════════════════════════════════════════════
+
+class _CarouselIndicator extends StatelessWidget {
+  final int itemCount;
+  final int currentIndex;
+
+  const _CarouselIndicator({
+    required this.itemCount,
+    required this.currentIndex,
+  });
+
+  @override
+  Widget build(BuildContext context) {
     return SizedBox(
-      width: 44,
-      height: 56,
-      child: CustomPaint(
-        painter: switch (form) {
-          _MedicationForm.bottle => _BottlePainter(color: color),
-          _MedicationForm.tablet => _TabletPainter(color: color),
-          _MedicationForm.syrup => _SyrupPainter(color: color),
-          _MedicationForm.injection => _InjectionPainter(color: color),
-        },
+      height: 10,
+      child: SingleChildScrollView(
+        scrollDirection: Axis.horizontal,
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: List.generate(
+            itemCount,
+                (index) {
+              final selected = index == currentIndex;
+
+              return AnimatedContainer(
+                duration: const Duration(milliseconds: 220),
+                curve: Curves.easeOut,
+                margin: const EdgeInsets.symmetric(horizontal: 4),
+                width: selected ? 22 : 8,
+                height: 8,
+                decoration: BoxDecoration(
+                  color: selected
+                      ? AppColors.primary
+                      : AppColors.border,
+                  borderRadius: BorderRadius.circular(10),
+                ),
+              );
+            },
+          ),
+        ),
       ),
     );
   }
@@ -515,517 +826,49 @@ class _MedicationVisual extends StatelessWidget {
 // ══════════════════════════════════════════════════════════════
 // COLOR UTILITIES
 // ══════════════════════════════════════════════════════════════
+
 Color _lighten(Color color, double amount) {
   final hsl = HSLColor.fromColor(color);
-  return hsl.withLightness((hsl.lightness + amount).clamp(0.0, 1.0)).toColor();
+
+  return hsl
+      .withLightness(
+    (hsl.lightness + amount).clamp(0.0, 1.0),
+  )
+      .toColor();
 }
 
 Color _darken(Color color, double amount) {
   final hsl = HSLColor.fromColor(color);
-  return hsl.withLightness((hsl.lightness - amount).clamp(0.0, 1.0)).toColor();
-}
 
-// ══════════════════════════════════════════════════════════════
-// PILL BOTTLE
-// ══════════════════════════════════════════════════════════════
-class _BottlePainter extends CustomPainter {
-  final Color color;
-
-  const _BottlePainter({required this.color});
-
-  @override
-  void paint(Canvas canvas, Size size) {
-    final w = size.width;
-    final h = size.height;
-
-    canvas.drawOval(
-      Rect.fromCenter(
-        center: Offset(w / 2, h - 2),
-        width: w * 0.85,
-        height: 4,
-      ),
-      Paint()
-        ..color = Colors.black.withValues(alpha: 0.08)
-        ..maskFilter = const MaskFilter.blur(BlurStyle.normal, 3),
-    );
-
-    canvas.drawRRect(
-      RRect.fromRectAndCorners(
-        Rect.fromLTWH(w * 0.15, 0, w * 0.7, h * 0.15),
-        topLeft: const Radius.circular(3),
-        topRight: const Radius.circular(3),
-      ),
-      Paint()..color = color,
-    );
-
-    canvas.drawRRect(
-      RRect.fromRectAndCorners(
-        Rect.fromLTWH(w * 0.18, h * 0.02, w * 0.15, h * 0.05),
-        topLeft: const Radius.circular(2),
-        bottomLeft: const Radius.circular(2),
-      ),
-      Paint()..color = Colors.white.withValues(alpha: 0.35),
-    );
-
-    canvas.drawRect(
-      Rect.fromLTWH(w * 0.15, h * 0.15, w * 0.7, h * 0.05),
-      Paint()..color = _darken(color, 0.15),
-    );
-
-    canvas.drawRRect(
-      RRect.fromRectAndCorners(
-        Rect.fromLTWH(w * 0.08, h * 0.2, w * 0.84, h * 0.78),
-        topLeft: const Radius.circular(4),
-        topRight: const Radius.circular(4),
-        bottomLeft: const Radius.circular(8),
-        bottomRight: const Radius.circular(8),
-      ),
-      Paint()
-        ..shader = LinearGradient(
-          begin: Alignment.topLeft,
-          end: Alignment.bottomRight,
-          colors: [
-            _lighten(color, 0.1),
-            color,
-            _darken(color, 0.1),
-          ],
-        ).createShader(Rect.fromLTWH(0, h * 0.2, w, h * 0.8)),
-    );
-
-    canvas.drawRRect(
-      RRect.fromRectAndRadius(
-        Rect.fromLTWH(w * 0.15, h * 0.4, w * 0.7, h * 0.35),
-        const Radius.circular(2),
-      ),
-      Paint()..color = Colors.white.withValues(alpha: 0.95),
-    );
-
-    final linePaint = Paint()
-      ..color = color.withValues(alpha: 0.5)
-      ..strokeWidth = 1.2
-      ..strokeCap = StrokeCap.round;
-
-    canvas.drawLine(
-      Offset(w * 0.22, h * 0.5),
-      Offset(w * 0.78, h * 0.5),
-      linePaint,
-    );
-
-    canvas.drawLine(
-      Offset(w * 0.22, h * 0.58),
-      Offset(w * 0.68, h * 0.58),
-      linePaint,
-    );
-
-    final rxPaint = Paint()
-      ..color = _darken(color, 0.2)
-      ..strokeWidth = 1.5
-      ..strokeCap = StrokeCap.round;
-
-    canvas.drawLine(
-      Offset(w * 0.28, h * 0.65),
-      Offset(w * 0.28, h * 0.72),
-      rxPaint,
-    );
-
-    canvas.drawLine(
-      Offset(w * 0.28, h * 0.65),
-      Offset(w * 0.34, h * 0.65),
-      rxPaint,
-    );
-
-    canvas.drawRRect(
-      RRect.fromRectAndCorners(
-        Rect.fromLTWH(w * 0.12, h * 0.22, w * 0.1, h * 0.7),
-        topLeft: const Radius.circular(3),
-        bottomLeft: const Radius.circular(6),
-      ),
-      Paint()
-        ..shader = LinearGradient(
-          begin: Alignment.topCenter,
-          end: Alignment.bottomCenter,
-          colors: [
-            Colors.white.withValues(alpha: 0.4),
-            Colors.white.withValues(alpha: 0.0),
-          ],
-        ).createShader(
-          Rect.fromLTWH(w * 0.12, h * 0.22, w * 0.1, h * 0.7),
-        ),
-    );
-  }
-
-  @override
-  bool shouldRepaint(covariant _BottlePainter old) => old.color != color;
-}
-
-// ══════════════════════════════════════════════════════════════
-// TABLET
-// ══════════════════════════════════════════════════════════════
-class _TabletPainter extends CustomPainter {
-  final Color color;
-
-  const _TabletPainter({required this.color});
-
-  @override
-  void paint(Canvas canvas, Size size) {
-    final w = size.width;
-    final h = size.height;
-
-    canvas.drawOval(
-      Rect.fromCenter(
-        center: Offset(w / 2, h - 2),
-        width: w * 0.9,
-        height: 4,
-      ),
-      Paint()
-        ..color = Colors.black.withValues(alpha: 0.08)
-        ..maskFilter = const MaskFilter.blur(BlurStyle.normal, 3),
-    );
-
-    _drawTablet(
-      canvas,
-      Offset(w * 0.28, h * 0.30),
-      w * 0.44,
-      h * 0.30,
-      color,
-    );
-
-    _drawTablet(
-      canvas,
-      Offset(w * 0.56, h * 0.42),
-      w * 0.44,
-      h * 0.30,
-      color,
-    );
-
-    _drawTablet(
-      canvas,
-      Offset(w * 0.42, h * 0.58),
-      w * 0.48,
-      h * 0.34,
-      color,
-    );
-  }
-
-  void _drawTablet(
-      Canvas canvas,
-      Offset topLeft,
-      double width,
-      double height,
-      Color baseColor,
-      ) {
-    final rect = Rect.fromLTWH(topLeft.dx, topLeft.dy, width, height);
-    final tabletRect = RRect.fromRectAndRadius(
-      rect,
-      Radius.circular(height / 2),
-    );
-
-    canvas.drawRRect(
-      tabletRect,
-      Paint()
-        ..shader = LinearGradient(
-          begin: Alignment.topLeft,
-          end: Alignment.bottomRight,
-          colors: [
-            _lighten(baseColor, 0.15),
-            baseColor,
-            _darken(baseColor, 0.15),
-          ],
-        ).createShader(rect),
-    );
-
-    canvas.drawLine(
-      Offset(rect.center.dx, rect.top + 3),
-      Offset(rect.center.dx, rect.bottom - 3),
-      Paint()
-        ..color = _darken(baseColor, 0.25).withValues(alpha: 0.6)
-        ..strokeWidth = 1,
-    );
-
-    canvas.drawRRect(
-      RRect.fromRectAndRadius(
-        Rect.fromLTWH(
-          rect.left + 3,
-          rect.top + 2,
-          rect.width - 6,
-          rect.height * 0.35,
-        ),
-        Radius.circular(height / 2),
-      ),
-      Paint()
-        ..shader = LinearGradient(
-          begin: Alignment.topCenter,
-          end: Alignment.bottomCenter,
-          colors: [
-            Colors.white.withValues(alpha: 0.4),
-            Colors.white.withValues(alpha: 0.0),
-          ],
-        ).createShader(rect),
-    );
-  }
-
-  @override
-  bool shouldRepaint(covariant _TabletPainter old) => old.color != color;
-}
-
-// ══════════════════════════════════════════════════════════════
-// SYRUP BOTTLE
-// ══════════════════════════════════════════════════════════════
-class _SyrupPainter extends CustomPainter {
-  final Color color;
-
-  const _SyrupPainter({required this.color});
-
-  @override
-  void paint(Canvas canvas, Size size) {
-    final w = size.width;
-    final h = size.height;
-
-    canvas.drawOval(
-      Rect.fromCenter(
-        center: Offset(w / 2, h - 2),
-        width: w * 0.75,
-        height: 4,
-      ),
-      Paint()
-        ..color = Colors.black.withValues(alpha: 0.08)
-        ..maskFilter = const MaskFilter.blur(BlurStyle.normal, 3),
-    );
-
-    canvas.drawRRect(
-      RRect.fromRectAndCorners(
-        Rect.fromLTWH(w * 0.30, 0, w * 0.4, h * 0.08),
-        topLeft: const Radius.circular(2),
-        topRight: const Radius.circular(2),
-      ),
-      Paint()..color = _darken(color, 0.3),
-    );
-
-    canvas.drawRect(
-      Rect.fromLTWH(w * 0.35, h * 0.08, w * 0.3, h * 0.08),
-      Paint()..color = Colors.grey.shade300,
-    );
-
-    final bodyRect = RRect.fromRectAndCorners(
-      Rect.fromLTWH(w * 0.15, h * 0.16, w * 0.7, h * 0.82),
-      topLeft: const Radius.circular(6),
-      topRight: const Radius.circular(6),
-      bottomLeft: const Radius.circular(10),
-      bottomRight: const Radius.circular(10),
-    );
-
-    canvas.drawRRect(
-      bodyRect,
-      Paint()..color = Colors.white.withValues(alpha: 0.9),
-    );
-
-    canvas.drawRRect(
-      bodyRect,
-      Paint()
-        ..color = Colors.grey.shade300
-        ..style = PaintingStyle.stroke
-        ..strokeWidth = 1,
-    );
-
-    final liquidRect = RRect.fromRectAndCorners(
-      Rect.fromLTWH(w * 0.17, h * 0.45, w * 0.66, h * 0.51),
-      bottomLeft: const Radius.circular(9),
-      bottomRight: const Radius.circular(9),
-    );
-
-    canvas.drawRRect(
-      liquidRect,
-      Paint()
-        ..shader = LinearGradient(
-          begin: Alignment.topCenter,
-          end: Alignment.bottomCenter,
-          colors: [
-            _lighten(color, 0.1),
-            color,
-            _darken(color, 0.15),
-          ],
-        ).createShader(Rect.fromLTWH(0, h * 0.45, w, h * 0.5)),
-    );
-
-    canvas.drawOval(
-      Rect.fromLTWH(w * 0.18, h * 0.43, w * 0.64, h * 0.05),
-      Paint()..color = _lighten(color, 0.2),
-    );
-
-    canvas.drawRRect(
-      RRect.fromRectAndRadius(
-        Rect.fromLTWH(w * 0.2, h * 0.55, w * 0.6, h * 0.25),
-        const Radius.circular(2),
-      ),
-      Paint()..color = Colors.white.withValues(alpha: 0.85),
-    );
-
-    final linePaint = Paint()
-      ..color = color.withValues(alpha: 0.6)
-      ..strokeWidth = 1.2
-      ..strokeCap = StrokeCap.round;
-
-    canvas.drawLine(
-      Offset(w * 0.25, h * 0.63),
-      Offset(w * 0.75, h * 0.63),
-      linePaint,
-    );
-
-    canvas.drawLine(
-      Offset(w * 0.25, h * 0.72),
-      Offset(w * 0.65, h * 0.72),
-      linePaint,
-    );
-
-    canvas.drawRRect(
-      RRect.fromRectAndCorners(
-        Rect.fromLTWH(w * 0.18, h * 0.2, w * 0.08, h * 0.7),
-        topLeft: const Radius.circular(4),
-        bottomLeft: const Radius.circular(8),
-      ),
-      Paint()
-        ..shader = LinearGradient(
-          begin: Alignment.topCenter,
-          end: Alignment.bottomCenter,
-          colors: [
-            Colors.white.withValues(alpha: 0.5),
-            Colors.white.withValues(alpha: 0.0),
-          ],
-        ).createShader(
-          Rect.fromLTWH(w * 0.18, h * 0.2, w * 0.08, h * 0.7),
-        ),
-    );
-  }
-
-  @override
-  bool shouldRepaint(covariant _SyrupPainter old) => old.color != color;
-}
-
-// ══════════════════════════════════════════════════════════════
-// INJECTION / SYRINGE
-// ══════════════════════════════════════════════════════════════
-class _InjectionPainter extends CustomPainter {
-  final Color color;
-
-  const _InjectionPainter({required this.color});
-
-  @override
-  void paint(Canvas canvas, Size size) {
-    final w = size.width;
-    final h = size.height;
-
-    canvas.drawOval(
-      Rect.fromCenter(
-        center: Offset(w / 2, h - 2),
-        width: w * 0.85,
-        height: 4,
-      ),
-      Paint()
-        ..color = Colors.black.withValues(alpha: 0.08)
-        ..maskFilter = const MaskFilter.blur(BlurStyle.normal, 3),
-    );
-
-    canvas.save();
-    canvas.translate(w / 2, h / 2);
-    canvas.rotate(-0.3);
-    canvas.translate(-w / 2, -h / 2);
-
-    canvas.drawRect(
-      Rect.fromLTWH(w * 0.48, h * 0.05, w * 0.04, h * 0.2),
-      Paint()..color = Colors.grey.shade400,
-    );
-
-    canvas.drawRect(
-      Rect.fromLTWH(w * 0.42, h * 0.22, w * 0.16, h * 0.05),
-      Paint()..color = Colors.grey.shade600,
-    );
-
-    final barrelRect = RRect.fromRectAndRadius(
-      Rect.fromLTWH(w * 0.35, h * 0.27, w * 0.30, h * 0.5),
-      const Radius.circular(3),
-    );
-
-    canvas.drawRRect(
-      barrelRect,
-      Paint()..color = Colors.white.withValues(alpha: 0.9),
-    );
-
-    canvas.drawRRect(
-      barrelRect,
-      Paint()
-        ..color = Colors.grey.shade400
-        ..style = PaintingStyle.stroke
-        ..strokeWidth = 1,
-    );
-
-    final liquidRect = RRect.fromRectAndRadius(
-      Rect.fromLTWH(w * 0.37, h * 0.32, w * 0.26, h * 0.43),
-      const Radius.circular(2),
-    );
-
-    canvas.drawRRect(
-      liquidRect,
-      Paint()
-        ..shader = LinearGradient(
-          begin: Alignment.topLeft,
-          end: Alignment.bottomRight,
-          colors: [
-            _lighten(color, 0.1),
-            color,
-            _darken(color, 0.1),
-          ],
-        ).createShader(
-          Rect.fromLTWH(w * 0.37, h * 0.32, w * 0.26, h * 0.43),
-        ),
-    );
-
-    final tickPaint = Paint()
-      ..color = Colors.grey.shade500
-      ..strokeWidth = 0.8;
-
-    for (int i = 1; i < 4; i++) {
-      final y = h * 0.32 + (h * 0.43 / 4) * i;
-      canvas.drawLine(
-        Offset(w * 0.63, y),
-        Offset(w * 0.68, y),
-        tickPaint,
-      );
-    }
-
-    canvas.drawRect(
-      Rect.fromLTWH(w * 0.33, h * 0.77, w * 0.34, h * 0.06),
-      Paint()..color = Colors.grey.shade600,
-    );
-
-    canvas.drawRect(
-      Rect.fromLTWH(w * 0.47, h * 0.83, w * 0.06, h * 0.15),
-      Paint()..color = Colors.grey.shade500,
-    );
-
-    canvas.restore();
-  }
-
-  @override
-  bool shouldRepaint(covariant _InjectionPainter old) => old.color != color;
+  return hsl
+      .withLightness(
+    (hsl.lightness - amount).clamp(0.0, 1.0),
+  )
+      .toColor();
 }
 
 // ══════════════════════════════════════════════════════════════
 // ALL DONE CARD
 // ══════════════════════════════════════════════════════════════
+
 class _AllDoneCard extends StatelessWidget {
   final int count;
 
-  const _AllDoneCard({required this.count});
+  const _AllDoneCard({
+    required this.count,
+  });
 
   @override
   Widget build(BuildContext context) {
+    final localization = AppLocalizations.of(context);
+
     return Container(
       width: double.infinity,
       padding: const EdgeInsets.all(24),
       decoration: BoxDecoration(
         gradient: LinearGradient(
           colors: [
-            AppColors.primary.withValues(alpha: 0.2),
+            AppColors.primary.withValues(alpha: 0.20),
             AppColors.primary.withValues(alpha: 0.05),
           ],
           begin: Alignment.topLeft,
@@ -1033,7 +876,7 @@ class _AllDoneCard extends StatelessWidget {
         ),
         borderRadius: BorderRadius.circular(20),
         border: Border.all(
-          color: AppColors.primary.withValues(alpha: 0.4),
+          color: AppColors.primary.withValues(alpha: 0.40),
         ),
       ),
       child: Column(
@@ -1052,12 +895,17 @@ class _AllDoneCard extends StatelessWidget {
           ),
           const SizedBox(height: 16),
           Text(
-            'All done for today!',
+            localization.t('allDoneTitle'),
             style: AppTextStyles.titleMedium,
           ),
           const SizedBox(height: 4),
           Text(
-            "You've taken all $count of your doses. Great job!",
+            localization.t(
+              'allDoneBody',
+              {
+                'count': '$count',
+              },
+            ),
             style: AppTextStyles.bodySmall,
             textAlign: TextAlign.center,
           ),
@@ -1070,13 +918,18 @@ class _AllDoneCard extends StatelessWidget {
 // ══════════════════════════════════════════════════════════════
 // EMPTY STATE
 // ══════════════════════════════════════════════════════════════
+
 class _EmptySchedule extends StatelessWidget {
   final VoidCallback onAddPressed;
 
-  const _EmptySchedule({required this.onAddPressed});
+  const _EmptySchedule({
+    required this.onAddPressed,
+  });
 
   @override
   Widget build(BuildContext context) {
+    final localization = AppLocalizations.of(context);
+
     return Container(
       width: double.infinity,
       padding: const EdgeInsets.symmetric(
@@ -1086,7 +939,9 @@ class _EmptySchedule extends StatelessWidget {
       decoration: BoxDecoration(
         color: AppColors.surface,
         borderRadius: BorderRadius.circular(20),
-        border: Border.all(color: AppColors.border),
+        border: Border.all(
+          color: AppColors.border,
+        ),
       ),
       child: Column(
         children: [
@@ -1104,27 +959,34 @@ class _EmptySchedule extends StatelessWidget {
           ),
           const SizedBox(height: 20),
           Text(
-            'Nothing scheduled today',
+            localization.t('nothingScheduled'),
             style: AppTextStyles.titleMedium,
           ),
           const SizedBox(height: 6),
           Text(
-            'Once you add medications with schedules,\nyour daily doses will appear here.',
+            localization.t('nothingScheduledBody'),
             style: AppTextStyles.bodySmall,
             textAlign: TextAlign.center,
           ),
           const SizedBox(height: 20),
           TextButton.icon(
             onPressed: onAddPressed,
-            icon: const Icon(Icons.add_rounded, size: 18),
-            label: const Text('Add Medication'),
+            icon: const Icon(
+              Icons.add_rounded,
+              size: 18,
+            ),
+            label: Text(
+              localization.t('addMedication'),
+            ),
             style: TextButton.styleFrom(
               foregroundColor: AppColors.secondary,
               padding: const EdgeInsets.symmetric(
                 horizontal: 24,
                 vertical: 12,
               ),
-              backgroundColor: AppColors.primary.withValues(alpha: 0.2),
+              backgroundColor: AppColors.primary.withValues(
+                alpha: 0.20,
+              ),
               shape: RoundedRectangleBorder(
                 borderRadius: BorderRadius.circular(12),
               ),
@@ -1139,6 +1001,7 @@ class _EmptySchedule extends StatelessWidget {
 // ══════════════════════════════════════════════════════════════
 // ERROR STATE
 // ══════════════════════════════════════════════════════════════
+
 class _ErrorState extends StatelessWidget {
   final String message;
   final VoidCallback onRetry;
@@ -1150,6 +1013,8 @@ class _ErrorState extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final localization = AppLocalizations.of(context);
+
     return Container(
       width: double.infinity,
       padding: const EdgeInsets.all(24),
@@ -1157,7 +1022,7 @@ class _ErrorState extends StatelessWidget {
         color: AppColors.surface,
         borderRadius: BorderRadius.circular(20),
         border: Border.all(
-          color: AppColors.error.withValues(alpha: 0.4),
+          color: AppColors.error.withValues(alpha: 0.40),
         ),
       ),
       child: Column(
@@ -1169,8 +1034,11 @@ class _ErrorState extends StatelessWidget {
           ),
           const SizedBox(height: 8),
           Text(
-            message,
+            message.isNotEmpty
+                ? message
+                : localization.t('couldNotLoadSchedule'),
             style: AppTextStyles.bodyMedium,
+            textAlign: TextAlign.center,
           ),
           const SizedBox(height: 12),
           TextButton.icon(
@@ -1179,7 +1047,9 @@ class _ErrorState extends StatelessWidget {
               Icons.refresh_rounded,
               size: 16,
             ),
-            label: const Text('Retry'),
+            label: Text(
+              localization.t('retry'),
+            ),
           ),
         ],
       ),
@@ -1188,8 +1058,9 @@ class _ErrorState extends StatelessWidget {
 }
 
 // ══════════════════════════════════════════════════════════════
-// SKELETON
+// LOADING SKELETON
 // ══════════════════════════════════════════════════════════════
+
 class _ScheduleSkeleton extends StatelessWidget {
   const _ScheduleSkeleton();
 
@@ -1197,9 +1068,16 @@ class _ScheduleSkeleton extends StatelessWidget {
   Widget build(BuildContext context) {
     return Column(
       children: [
-        SkeletonBox(height: 80, borderRadius: 16),
-        const SizedBox(height: 10),
-        SkeletonBox(height: 80, borderRadius: 16),
+        SkeletonBox(
+          height: 400,
+          borderRadius: 18,
+        ),
+        const SizedBox(height: 12),
+        SkeletonBox(
+          height: 8,
+          width: 70,
+          borderRadius: 10,
+        ),
       ],
     );
   }

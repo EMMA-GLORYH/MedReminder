@@ -20,26 +20,24 @@ class DoseLogService {
 
     debugPrint('✅ Marking dose as taken');
 
-    final now = DateTime.now();
+    final now              = DateTime.now();
     final deviationMinutes = now.difference(scheduledFor).inMinutes;
-    final status = deviationMinutes.abs() > 30 ? 'late' : 'taken';
+    final status           = deviationMinutes.abs() > 30 ? 'late' : 'taken';
 
     try {
       await supabase.from('dose_logs').upsert({
-        'schedule_id': scheduleId,
+        'schedule_id':   scheduleId,
         'medication_id': medicationId,
-        'patient_id': userId,
+        'patient_id':    userId,
         'scheduled_for': scheduledFor.toIso8601String(),
-        'logged_at': now.toIso8601String(),
-        'status': status,
-        'confirmed_by': userId,
+        'logged_at':     now.toIso8601String(),
+        'status':        status,
+        'confirmed_by':  userId,
       }, onConflict: 'patient_id,schedule_id,scheduled_for');
 
       debugPrint('✅ Dose log saved to Supabase');
 
-      // ✅ STOP SPEECH immediately
       await MedicationTtsService.instance.stop();
-
     } catch (e, st) {
       debugPrint('❌ CRITICAL: Failed to save dose log: $e');
       debugPrint('$st');
@@ -49,7 +47,7 @@ class DoseLogService {
     try {
       await supabase.from('medication_schedules').update({
         'last_taken_at': now.toIso8601String(),
-        'updated_at': now.toIso8601String(),
+        'updated_at':    now.toIso8601String(),
       }).eq('id', scheduleId).eq('patient_id', userId);
       debugPrint('✅ Schedule last_taken_at updated');
     } catch (e, st) {
@@ -65,9 +63,8 @@ class DoseLogService {
     }
 
     try {
-      // Cancels notifications AND (after we update it) cancels the Android TTS alarm too
       await LocalNotificationService.instance.cancelDose(
-        scheduleId: scheduleId,
+        scheduleId:   scheduleId,
         scheduledFor: scheduledFor,
       );
       debugPrint('✅ Device alarms cancelled for this dose');
@@ -90,21 +87,19 @@ class DoseLogService {
 
     try {
       await supabase.from('dose_logs').upsert({
-        'schedule_id': scheduleId,
+        'schedule_id':   scheduleId,
         'medication_id': medicationId,
-        'patient_id': userId,
+        'patient_id':    userId,
         'scheduled_for': scheduledFor.toIso8601String(),
-        'logged_at': now.toIso8601String(),
-        'status': 'skipped',
-        'notes': reason,
-        'confirmed_by': userId,
+        'logged_at':     now.toIso8601String(),
+        'status':        'skipped',
+        'notes':         reason,
+        'confirmed_by':  userId,
       }, onConflict: 'patient_id,schedule_id,scheduled_for');
 
       debugPrint('⏭️ Dose skipped in Supabase');
 
-      // ✅ STOP SPEECH too
       await MedicationTtsService.instance.stop();
-
     } catch (e, st) {
       debugPrint('❌ Failed to skip dose: $e');
       debugPrint('$st');
@@ -113,7 +108,7 @@ class DoseLogService {
 
     try {
       await LocalNotificationService.instance.cancelDose(
-        scheduleId: scheduleId,
+        scheduleId:   scheduleId,
         scheduledFor: scheduledFor,
       );
       debugPrint('✅ Skipped dose alarms cancelled');
@@ -134,8 +129,8 @@ class DoseLogService {
       final data = await supabase
           .from('dose_logs')
           .select('id')
-          .eq('patient_id', userId)
-          .eq('schedule_id', scheduleId)
+          .eq('patient_id',    userId)
+          .eq('schedule_id',   scheduleId)
           .eq('scheduled_for', scheduledFor.toIso8601String())
           .limit(1);
 
@@ -151,7 +146,7 @@ class DoseLogService {
     if (userId == null) return {};
 
     final startOfDay = DateTime(date.year, date.month, date.day);
-    final endOfDay = startOfDay.add(const Duration(days: 1));
+    final endOfDay   = startOfDay.add(const Duration(days: 1));
 
     try {
       final data = await supabase
@@ -159,7 +154,7 @@ class DoseLogService {
           .select('schedule_id, scheduled_for, status')
           .eq('patient_id', userId)
           .gte('scheduled_for', startOfDay.toIso8601String())
-          .lt('scheduled_for', endOfDay.toIso8601String())
+          .lt('scheduled_for',  endOfDay.toIso8601String())
           .inFilter('status', ['taken', 'late']);
 
       final keys = <String>{};
@@ -203,11 +198,32 @@ class DoseLogService {
 
       await supabase.from('medications').update({
         'current_quantity': current - 1,
-        'updated_at': DateTime.now().toIso8601String(),
+        'updated_at':       DateTime.now().toIso8601String(),
       }).eq('id', medicationId);
     } catch (e, st) {
       debugPrint('⚠️ Could not decrement quantity: $e');
       debugPrint('$st');
+    }
+  }
+
+  // ── FETCH COMPLETE HISTORY (FOR HISTORY TAB) ──
+  Future<List<Map<String, dynamic>>> getDoseHistory() async {
+    final userId = AuthService.instance.currentUser?.id;
+    if (userId == null) throw Exception('Not logged in');
+
+    try {
+      // Queries our indexed view directly for maximum speed
+      final data = await supabase
+          .from('dose_history_view')
+          .select()
+          .eq('patient_id', userId)
+          .order('scheduled_for', ascending: false);
+
+      return List<Map<String, dynamic>>.from(data);
+    } catch (e, st) {
+      debugPrint('❌ Failed to fetch dose history: $e');
+      debugPrint('$st');
+      return [];
     }
   }
 }
