@@ -383,6 +383,57 @@ class CareRelationshipService {
     }).toList();
   }
 
+  /// Fetch one indexed page of active patients this caretaker monitors,
+  /// most recently accepted first. Backed by Postgres `.range()`, so only
+  /// the requested rows are ever transferred or rendered.
+  Future<List<CareRelationship>> getPatientsIMonitorPage({
+    required int offset,
+    required int limit,
+  }) async {
+    final caregiverId = AuthService.instance.currentUser?.id;
+    if (caregiverId == null) throw Exception('Not logged in');
+
+    debugPrint('📋 Fetching monitored patients page (offset=$offset, limit=$limit)');
+
+    final data = await supabase
+        .from('care_relationships')
+        .select('''
+          *,
+          profiles!care_relationships_patient_id_fkey(
+            full_name, phone_number, avatar_url
+          )
+        ''')
+        .eq('caregiver_id', caregiverId)
+        .eq('status', 'active')
+        .order('accepted_at', ascending: false)
+        .range(offset, offset + limit - 1);
+
+    return (data as List).map((j) {
+      final map = Map<String, dynamic>.from(j as Map<String, dynamic>);
+      map['_patient_profile'] = map['profiles'];
+      return CareRelationship.fromJsonAsCaretaker(map);
+    }).toList();
+  }
+
+  /// Lightweight count of active patients, without transferring any row
+  /// data — used to show an accurate total even though the list itself
+  /// is paginated.
+  Future<int> getActivePatientCount() async {
+    final caregiverId = AuthService.instance.currentUser?.id;
+    if (caregiverId == null) return 0;
+    try {
+      final response = await supabase
+          .from('care_relationships')
+          .select('id')
+          .eq('caregiver_id', caregiverId)
+          .eq('status', 'active')
+          .count(CountOption.exact);
+      return response.count;
+    } catch (_) {
+      return 0;
+    }
+  }
+
   // ══════════════════════════════════════════════════════════════
   // REALTIME — live invite updates for caretaker
   // ══════════════════════════════════════════════════════════════
