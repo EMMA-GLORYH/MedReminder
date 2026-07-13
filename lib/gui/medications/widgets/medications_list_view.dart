@@ -19,8 +19,12 @@ import 'medication_card.dart';
 import 'medication_hero.dart';
 import 'medication_search_delegate.dart';
 
-// ─── Cache key ────────────────────────────────────────────────
-const _kCacheKey = 'medications_list_cache_v1';
+// ─── Cache key — holds only the first indexed page, for instant paint ──
+const _kCacheKey = 'medications_list_first_page_cache_v1';
+
+// How many medications are fetched per index page. Small enough to render
+// a clean first screen; large enough that most patients never scroll.
+const _kPageSize = 12;
 
 class MedicationsListView extends StatefulWidget {
   const MedicationsListView({super.key});
@@ -33,19 +37,32 @@ class _MedicationsListViewState extends State<MedicationsListView> {
   List<Medication> _medications         = [];
   List<Medication> _filteredMedications = [];
   Map<String, bool> _hasScheduleMap     = {};
+  List<dynamic> _schedules              = []; // fetched once, reused per page
+  // ^ typed dynamic deliberately: this file doesn't need to know the exact
+  //   Schedule model shape, only that each item has a `.medicationId`.
+  //   Swap `List<dynamic>` for your real `List<Schedule>` type if you'd
+  //   rather have compile-time checking here.
 
-  bool _isFirstLoad = true;  // true only before any data (cached or live) shown
-  bool _isSyncing   = false; // background sync indicator
+  bool _isFirstLoad   = true;  // true until first page (cache or live) shown
+  bool _isSyncing     = false; // refreshing the first page in the background
+  bool _isLoadingMore = false; // fetching the next index page
+  bool _hasMore       = true;  // whether another page might exist
+  int  _offset        = 0;     // next index to fetch from
+  int? _totalCount;            // accurate total from a lightweight count query
   String? _error;
 
   final TextEditingController _searchController = TextEditingController();
+  final ScrollController _scrollController = ScrollController();
   Timer? _debounce;
+
+  bool get _isSearching => _searchController.text.trim().isNotEmpty;
 
   // ── Init ────────────────────────────────────────────────────
   @override
   void initState() {
     super.initState();
     _searchController.addListener(_onSearchChanged);
+    _scrollController.addListener(_onScroll);
     _bootLoad();
   }
 
@@ -53,17 +70,17 @@ class _MedicationsListViewState extends State<MedicationsListView> {
   void dispose() {
     _debounce?.cancel();
     _searchController.dispose();
+    _scrollController.dispose();
     super.dispose();
   }
 
-  // ── Boot: show cache instantly, sync in background ──────────
+  // ── Boot: paint the first page from cache instantly, then reconcile ──
   Future<void> _bootLoad() async {
-    await _loadFromCache();
-    _syncFromServer();
+    await _loadFirstPageFromCache();
+    await _syncFirstPageFromServer();
   }
 
-  // ── Read from SharedPreferences ─────────────────────────────
-  Future<void> _loadFromCache() async {
+  Future<void> _loadFirstPageFromCache() async {
     try {
       final prefs = await SharedPreferences.getInstance();
       final raw   = prefs.getString(_kCacheKey);
@@ -76,16 +93,16 @@ class _MedicationsListViewState extends State<MedicationsListView> {
       if (!mounted) return;
       setState(() {
         _medications = list;
+        _offset      = list.length;
         _isFirstLoad = false;
       });
       _applyFilters();
     } catch (_) {
-      // Corrupt cache — server will repopulate it
+      // Corrupt cache — the server sync below will repopulate it.
     }
   }
 
-  // ── Write to SharedPreferences ───────────────────────────────
-  Future<void> _saveToCache(List<Medication> meds) async {
+  Future<void> _saveFirstPageToCache(List<Medication> meds) async {
     try {
       final prefs = await SharedPreferences.getInstance();
       await prefs.setString(
@@ -95,26 +112,36 @@ class _MedicationsListViewState extends State<MedicationsListView> {
     } catch (_) {}
   }
 
-  // ── Fetch from server ────────────────────────────────────────
-  Future<void> _syncFromServer() async {
-    if (_isSyncing) return;
+  // ── Index page 0 from the server — resets pagination state ──────────
+  Future<void> _syncFirstPageFromServer() async {
     if (mounted) setState(() => _isSyncing = true);
 
     try {
-      final meds      = await MedicationService.instance.getMyMedications();
-      final schedules = await ScheduleService.instance.getMySchedules();
+      final results = await Future.wait([
+        ScheduleService.instance.getMySchedules(),
+        MedicationService.instance.getMyMedicationsPage(offset: 0, limit: _kPageSize),
+        MedicationService.instance.getMedicationsCount(),
+      ]);
 
-      final scheduleMap = <String, bool>{};
-      for (final med in meds) {
-        scheduleMap[med.id] = schedules.any((s) => s.medicationId == med.id);
-      }
+      final schedules = results[0] as List<dynamic>;
+      final firstPage = results[1] as List<Medication>;
+      final total     = results[2] as int;
 
-      await _saveToCache(meds);
+      final scheduleMap = <String, bool>{
+        for (final m in firstPage)
+          m.id: schedules.any((s) => s.medicationId == m.id),
+      };
+
+      await _saveFirstPageToCache(firstPage);
 
       if (!mounted) return;
       setState(() {
-        _medications    = meds;
+        _medications    = firstPage;
+        _schedules      = schedules;
         _hasScheduleMap = scheduleMap;
+        _offset         = firstPage.length;
+        _hasMore        = firstPage.length == _kPageSize;
+        _totalCount     = total;
         _isFirstLoad    = false;
         _isSyncing      = false;
         _error          = null;
@@ -124,22 +151,71 @@ class _MedicationsListViewState extends State<MedicationsListView> {
       if (!mounted) return;
       setState(() {
         _isSyncing = false;
-        // Only show error if there's nothing to display at all
         if (_medications.isEmpty) _error = 'Could not load medications';
       });
     }
   }
 
-  // ── Navigate then refresh optimistically ────────────────────
-  Future<void> _go(Future<Object?> Function() navigate) async {
-    final result = await navigate();
-    if (result == true) {
-      await _loadFromCache(); // show any locally-written cache immediately
-      _syncFromServer();      // reconcile with server in background
+  // ── Next index page — appends, never replaces ────────────────────────
+  Future<void> _loadMore() async {
+    if (_isLoadingMore || !_hasMore || _isSearching) return;
+    setState(() => _isLoadingMore = true);
+
+    try {
+      final next = await MedicationService.instance.getMyMedicationsPage(
+        offset: _offset,
+        limit:  _kPageSize,
+      );
+
+      final scheduleMap = Map<String, bool>.from(_hasScheduleMap);
+      for (final m in next) {
+        scheduleMap[m.id] = _schedules.any((s) => s.medicationId == m.id);
+      }
+
+      if (!mounted) return;
+      setState(() {
+        _medications    = [..._medications, ...next];
+        _hasScheduleMap = scheduleMap;
+        _offset         += next.length;
+        _hasMore        = next.length == _kPageSize;
+        _isLoadingMore  = false;
+      });
+      _applyFilters();
+    } catch (e) {
+      if (!mounted) return;
+      setState(() => _isLoadingMore = false);
+      // Silent failure — the trailing "load more" row simply stays put
+      // and the user can trigger it again by scrolling.
     }
   }
 
-  // ── Search ───────────────────────────────────────────────────
+  void _onScroll() {
+    if (!_scrollController.hasClients) return;
+    const threshold = 300.0;
+    final pos = _scrollController.position;
+    if (pos.pixels >= pos.maxScrollExtent - threshold) {
+      _loadMore();
+    }
+  }
+
+  /// Resets pagination back to page 0 and refetches — used after add/edit/
+  /// delete and on pull-to-refresh, since those actions can change which
+  /// items belong on page 0 (e.g. a newly added medication sorts first).
+  Future<void> _refreshAll() async {
+    _offset  = 0;
+    _hasMore = true;
+    await _syncFirstPageFromServer();
+  }
+
+  // ── Navigate then refresh ────────────────────────────────────────────
+  Future<void> _go(Future<Object?> Function() navigate) async {
+    final result = await navigate();
+    if (result == true) {
+      await _refreshAll();
+    }
+  }
+
+  // ── Search — filters within currently loaded pages ───────────────────
   void _onSearchChanged() {
     _debounce?.cancel();
     _debounce = Timer(const Duration(milliseconds: 300), _applyFilters);
@@ -152,18 +228,18 @@ class _MedicationsListViewState extends State<MedicationsListView> {
         _filteredMedications = List.from(_medications);
       } else {
         final results = MedicationSearchAlgorithm.search<Medication>(
-          items:         _medications,
-          query:         query,
-          getBrandName:  (m) => m.displayName,
+          items:          _medications,
+          query:          query,
+          getBrandName:   (m) => m.displayName,
           getGenericName: (m) => m.genericName,
-          getNotes:      (m) => m.notes,
+          getNotes:       (m) => m.notes,
         );
         _filteredMedications = results.map((r) => r.item).toList();
       }
     });
   }
 
-  // ── Build ────────────────────────────────────────────────────
+  // ── Build ──────────────────────────────────────────────────────────
   @override
   Widget build(BuildContext context) {
     return Scaffold(
@@ -171,7 +247,7 @@ class _MedicationsListViewState extends State<MedicationsListView> {
       body: Column(
         children: [
           MedicationHero(
-            totalMedications: _medications.length,
+            totalMedications: _totalCount ?? _medications.length,
             scheduledCount: _medications
                 .where((m) => _hasScheduleMap[m.id] == true)
                 .length,
@@ -179,7 +255,7 @@ class _MedicationsListViewState extends State<MedicationsListView> {
             onClearSearch:    () => _searchController.clear(),
           ),
 
-          // Thin sync progress bar — only visible while background syncing
+          // Thin progress bar — visible while the first page is syncing.
           AnimatedContainer(
             duration: const Duration(milliseconds: 300),
             height:   _isSyncing ? 3 : 0,
@@ -212,7 +288,7 @@ class _MedicationsListViewState extends State<MedicationsListView> {
     if (_isFirstLoad) return const _LoadingSkeleton();
 
     if (_error != null && _medications.isEmpty) {
-      return _ErrorView(message: _error!, onRetry: _syncFromServer);
+      return _ErrorView(message: _error!, onRetry: _refreshAll);
     }
 
     if (_medications.isEmpty) {
@@ -226,7 +302,7 @@ class _MedicationsListViewState extends State<MedicationsListView> {
       );
     }
 
-    if (_filteredMedications.isEmpty && _searchController.text.isNotEmpty) {
+    if (_filteredMedications.isEmpty && _isSearching) {
       return ListView(children: [
         const SizedBox(height: 60),
         Center(
@@ -239,14 +315,38 @@ class _MedicationsListViewState extends State<MedicationsListView> {
       ]);
     }
 
+    // A trailing "loading more" row is appended only when there may be
+    // more indexed pages left and the user isn't currently searching
+    // (search operates over what's already loaded).
+    final showLoadMoreRow = _hasMore && !_isSearching;
+    final itemCount = _filteredMedications.length + (showLoadMoreRow ? 1 : 0);
+
     return RefreshIndicator(
       color:     AppColors.primary,
-      onRefresh: _syncFromServer,
+      onRefresh: _refreshAll,
       child: ListView.separated(
+        controller:       _scrollController,
         padding:          const EdgeInsets.fromLTRB(16, 16, 16, 80),
-        itemCount:        _filteredMedications.length,
+        itemCount:        itemCount,
         separatorBuilder: (_, __) => const SizedBox(height: 2),
         itemBuilder: (context, index) {
+          if (index >= _filteredMedications.length) {
+            // Trailing row: spinner while a page is in flight, otherwise
+            // an invisible sentinel that simply triggers _onScroll.
+            return Padding(
+              padding: const EdgeInsets.symmetric(vertical: 20),
+              child: Center(
+                child: _isLoadingMore
+                    ? const SizedBox(
+                  width: 22,
+                  height: 22,
+                  child: CircularProgressIndicator(strokeWidth: 2.4),
+                )
+                    : const SizedBox(height: 22),
+              ),
+            );
+          }
+
           final med = _filteredMedications[index];
           return MedicationCard(
             medication:  med,
@@ -287,11 +387,11 @@ class _LoadingSkeleton extends StatelessWidget {
     return ListView(
       padding: const EdgeInsets.all(16),
       children: const [
-        SkeletonBox(height: 60, borderRadius: 12),
+        SkeletonBox(height: 96, borderRadius: 12),
         SizedBox(height: 8),
-        SkeletonBox(height: 60, borderRadius: 12),
+        SkeletonBox(height: 96, borderRadius: 12),
         SizedBox(height: 8),
-        SkeletonBox(height: 60, borderRadius: 12),
+        SkeletonBox(height: 96, borderRadius: 12),
       ],
     );
   }

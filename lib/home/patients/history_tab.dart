@@ -77,19 +77,64 @@ class _HistoryTabState extends State<HistoryTab> {
     return '${weekdays[date.weekday % 7]}, ${months[date.month - 1]} ${date.day}';
   }
 
+  // ── One Scaffold for every state — loading, error, empty, and loaded ──
+  // all share the same AppBar and background, so nothing pops in/out or
+  // renders on an unstyled background as the screen transitions between
+  // states.
   @override
   Widget build(BuildContext context) {
+    return Scaffold(
+      backgroundColor: AppColors.background,
+      appBar: AppBar(
+        title: const Text('Dose Log History'),
+        elevation: 0,
+        backgroundColor: Colors.transparent,
+        foregroundColor: AppColors.textPrimary,
+      ),
+      body: SafeArea(child: _buildBody()),
+    );
+  }
+
+  Widget _buildBody() {
     if (_isLoading) return const _HistorySkeleton();
 
     if (_error != null) {
-      return Center(
-        child: Column(
-          mainAxisAlignment: MainAxisAlignment.center,
+      return RefreshIndicator(
+        onRefresh: _loadHistory,
+        color: AppColors.primary,
+        child: ListView(
+          physics: const AlwaysScrollableScrollPhysics(),
           children: [
-            const Icon(Icons.error_outline_rounded, size: 48, color: AppColors.error),
-            const SizedBox(height: 12),
-            Text(_error!, style: AppTextStyles.titleMedium),
-            TextButton(onPressed: _loadHistory, child: const Text('Retry')),
+            SizedBox(height: MediaQuery.of(context).size.height * 0.2),
+            Center(
+              child: Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 32),
+                child: Column(
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  children: [
+                    Container(
+                      padding: const EdgeInsets.all(20),
+                      decoration: BoxDecoration(
+                        color: AppColors.error.withValues(alpha: 0.1),
+                        shape: BoxShape.circle,
+                      ),
+                      child: const Icon(Icons.error_outline_rounded,
+                          size: 44, color: AppColors.error),
+                    ),
+                    const SizedBox(height: 16),
+                    Text(_error!,
+                        style: AppTextStyles.titleMedium,
+                        textAlign: TextAlign.center),
+                    const SizedBox(height: 12),
+                    TextButton.icon(
+                      onPressed: _loadHistory,
+                      icon: const Icon(Icons.refresh_rounded, size: 18),
+                      label: const Text('Retry'),
+                    ),
+                  ],
+                ),
+              ),
+            ),
           ],
         ),
       );
@@ -102,28 +147,33 @@ class _HistoryTabState extends State<HistoryTab> {
         child: ListView(
           physics: const AlwaysScrollableScrollPhysics(),
           children: [
-            SizedBox(height: MediaQuery.of(context).size.height * 0.25),
+            SizedBox(height: MediaQuery.of(context).size.height * 0.2),
             Center(
-              child: Column(
-                mainAxisAlignment: MainAxisAlignment.center,
-                children: [
-                  Container(
-                    padding: const EdgeInsets.all(20),
-                    decoration: BoxDecoration(
-                      color: AppColors.primary.withValues(alpha: 0.1),
-                      shape: BoxShape.circle,
+              child: Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 32),
+                child: Column(
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  children: [
+                    Container(
+                      padding: const EdgeInsets.all(20),
+                      decoration: BoxDecoration(
+                        color: AppColors.primary.withValues(alpha: 0.1),
+                        shape: BoxShape.circle,
+                      ),
+                      child: const Icon(Icons.history_rounded,
+                          size: 44, color: AppColors.secondary),
                     ),
-                    child: const Icon(Icons.history_rounded, size: 48, color: AppColors.secondary),
-                  ),
-                  const SizedBox(height: 16),
-                  Text('No history yet', style: AppTextStyles.h2),
-                  const SizedBox(height: 8),
-                  Text(
-                    'Your verified dose history will appear here.',
-                    style: AppTextStyles.bodyMedium.copyWith(color: AppColors.textSecondary),
-                    textAlign: TextAlign.center,
-                  ),
-                ],
+                    const SizedBox(height: 16),
+                    Text('No history yet', style: AppTextStyles.h2),
+                    const SizedBox(height: 8),
+                    Text(
+                      'Your verified dose history will appear here.',
+                      style: AppTextStyles.bodyMedium
+                          .copyWith(color: AppColors.textSecondary),
+                      textAlign: TextAlign.center,
+                    ),
+                  ],
+                ),
               ),
             ),
           ],
@@ -132,44 +182,73 @@ class _HistoryTabState extends State<HistoryTab> {
     }
 
     final grouped = _groupHistoryByDate();
+    final dateKeys = grouped.keys.toList();
 
-    return Scaffold(
-      backgroundColor: AppColors.background,
-      appBar: AppBar(
-        title: const Text('Dose Log History'),
-        elevation: 0,
-        backgroundColor: Colors.transparent,
+    return RefreshIndicator(
+      color: AppColors.primary,
+      onRefresh: _loadHistory,
+      child: ListView.builder(
+        physics: const AlwaysScrollableScrollPhysics(),
+        padding: const EdgeInsets.fromLTRB(16, 12, 16, 24),
+        itemCount: dateKeys.length,
+        itemBuilder: (context, index) {
+          final dateKey = dateKeys[index];
+          final logs = grouped[dateKey]!;
+
+          return Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              _DateSectionHeader(label: dateKey, count: logs.length),
+              const SizedBox(height: 8),
+              ...logs.map((log) => _HistoryCard(log: log)),
+              const SizedBox(height: 12),
+            ],
+          );
+        },
       ),
-      body: RefreshIndicator(
-        color: AppColors.primary,
-        onRefresh: _loadHistory,
-        child: ListView.builder(
-          physics: const AlwaysScrollableScrollPhysics(),
-          padding: const EdgeInsets.all(16),
-          itemCount: grouped.keys.length,
-          itemBuilder: (context, index) {
-            final dateKey = grouped.keys.elementAt(index);
-            final logs = grouped[dateKey]!;
+    );
+  }
+}
 
-            return Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Padding(
-                  padding: const EdgeInsets.symmetric(vertical: 12, horizontal: 4),
-                  child: Text(
-                    dateKey,
-                    style: AppTextStyles.titleMedium.copyWith(
-                      color: AppColors.secondary,
-                      fontWeight: FontWeight.bold,
-                    ),
-                  ),
-                ),
-                ...logs.map((log) => _HistoryCard(log: log)),
-                const SizedBox(height: 8),
-              ],
-            );
-          },
-        ),
+// ══════════════════════════════════════════════════════════════
+// DATE SECTION HEADER
+// ══════════════════════════════════════════════════════════════
+class _DateSectionHeader extends StatelessWidget {
+  final String label;
+  final int count;
+  const _DateSectionHeader({required this.label, required this.count});
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 8, horizontal: 4),
+      child: Row(
+        children: [
+          Text(
+            label,
+            style: AppTextStyles.titleMedium.copyWith(
+              color: AppColors.textPrimary,
+              fontWeight: FontWeight.bold,
+            ),
+          ),
+          const SizedBox(width: 8),
+          Container(
+            padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+            decoration: BoxDecoration(
+              color: AppColors.primary.withValues(alpha: 0.12),
+              borderRadius: BorderRadius.circular(20),
+            ),
+            child: Text(
+              '$count',
+              style: AppTextStyles.labelSmall.copyWith(
+                color: AppColors.primary,
+                fontWeight: FontWeight.bold,
+              ),
+            ),
+          ),
+          const SizedBox(width: 12),
+          Expanded(child: Divider(color: AppColors.border, height: 1)),
+        ],
       ),
     );
   }
@@ -198,6 +277,21 @@ class _HistoryCard extends StatelessWidget {
     }
   }
 
+  IconData _getStatusIcon(String status) {
+    switch (status.toLowerCase()) {
+      case 'taken':
+        return Icons.check_circle_rounded;
+      case 'late':
+        return Icons.schedule_rounded;
+      case 'skipped':
+        return Icons.remove_circle_outline_rounded;
+      case 'missed':
+        return Icons.cancel_rounded;
+      default:
+        return Icons.circle_outlined;
+    }
+  }
+
   String _formatLogTime(String scheduledString, String? loggedString, String status) {
     final scheduled = DateTime.parse(scheduledString).toLocal();
     final h = scheduled.hour;
@@ -216,7 +310,7 @@ class _HistoryCard extends StatelessWidget {
     final lp = lh >= 12 ? 'PM' : 'AM';
     final ldh = lh == 0 ? 12 : (lh > 12 ? lh - 12 : lh);
 
-    return 'Taken at $ldh:$lm $lp (Sched: $scheduledTimeStr)';
+    return 'Taken at $ldh:$lm $lp · Sched $scheduledTimeStr';
   }
 
   @override
@@ -241,95 +335,139 @@ class _HistoryCard extends StatelessWidget {
       deviationText = '${deviation.abs()}m early';
     }
 
+    final hasNotes = log['notes'] != null && (log['notes'] as String).trim().isNotEmpty;
+
     return Container(
       margin: const EdgeInsets.only(bottom: 10),
       padding: const EdgeInsets.all(14),
       decoration: BoxDecoration(
         color: AppColors.surface,
         borderRadius: BorderRadius.circular(16),
-        border: Border.all(color: AppColors.border),
+        border: Border.all(color: statusColor.withValues(alpha: 0.25)),
       ),
-      child: Row(
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          // Medicine Image or Fallback Color Dot
-          ClipRRect(
-            borderRadius: BorderRadius.circular(12),
-            child: pillImageUrl != null && pillImageUrl.isNotEmpty
-                ? Image.network(
-              pillImageUrl,
-              width: 52,
-              height: 52,
-              fit: BoxFit.cover,
-              errorBuilder: (_, __, ___) => _FallbackAvatar(colorStr: pillColorStr),
-            )
-                : _FallbackAvatar(colorStr: pillColorStr),
-          ),
-          const SizedBox(width: 14),
-
-          // Details
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(
-                  displayName,
-                  style: AppTextStyles.titleSmall,
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                ),
-                const SizedBox(height: 3),
-                Text(
-                  _formatLogTime(log['scheduled_for'] as String, log['logged_at'] as String?, status),
-                  style: AppTextStyles.bodySmall.copyWith(color: AppColors.textSecondary),
-                ),
-                if (log['notes'] != null && (log['notes'] as String).isNotEmpty) ...[
-                  const SizedBox(height: 4),
-                  Text(
-                    'Note: ${log['notes']}',
-                    style: AppTextStyles.bodySmall.copyWith(fontStyle: FontStyle.italic),
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                  ),
-                ]
-              ],
-            ),
-          ),
-
-          const SizedBox(width: 8),
-
-          // Status & Deviation Badge
-          Column(
-            crossAxisAlignment: CrossAxisAlignment.end,
-            mainAxisAlignment: MainAxisAlignment.center,
+          Row(
+            crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              Container(
-                padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
-                decoration: BoxDecoration(
-                  color: statusColor.withValues(alpha: 0.12),
-                  borderRadius: BorderRadius.circular(8),
-                ),
-                child: Text(
-                  status.toUpperCase(),
-                  style: AppTextStyles.labelSmall.copyWith(
-                    color: statusColor,
-                    fontWeight: FontWeight.bold,
-                    fontSize: 9,
-                  ),
+              // ── Medicine image or fallback color avatar ──
+              ClipRRect(
+                borderRadius: BorderRadius.circular(12),
+                child: pillImageUrl != null && pillImageUrl.isNotEmpty
+                    ? Image.network(
+                  pillImageUrl,
+                  width: 52,
+                  height: 52,
+                  fit: BoxFit.cover,
+                  errorBuilder: (_, __, ___) => _FallbackAvatar(colorStr: pillColorStr),
+                )
+                    : _FallbackAvatar(colorStr: pillColorStr),
+              ),
+              const SizedBox(width: 14),
+
+              // ── Name, dosage, timing ──
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      displayName,
+                      style: AppTextStyles.titleSmall,
+                      maxLines: 2,
+                      overflow: TextOverflow.ellipsis,
+                    ),
+                    const SizedBox(height: 2),
+                    Text(
+                      dosageDisplay,
+                      style: AppTextStyles.bodySmall.copyWith(
+                        color: AppColors.secondary,
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                    const SizedBox(height: 4),
+                    Text(
+                      _formatLogTime(
+                          log['scheduled_for'] as String, log['logged_at'] as String?, status),
+                      style: AppTextStyles.bodySmall.copyWith(color: AppColors.textSecondary),
+                    ),
+                  ],
                 ),
               ),
-              if (deviationText != null) ...[
-                const SizedBox(height: 4),
-                Text(
-                  deviationText,
-                  style: AppTextStyles.labelSmall.copyWith(
-                    color: statusColor,
-                    fontSize: 9,
-                    fontWeight: FontWeight.w600,
+
+              const SizedBox(width: 8),
+
+              // ── Status badge ──
+              Column(
+                crossAxisAlignment: CrossAxisAlignment.end,
+                children: [
+                  Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 5),
+                    decoration: BoxDecoration(
+                      color: statusColor.withValues(alpha: 0.12),
+                      borderRadius: BorderRadius.circular(8),
+                    ),
+                    child: Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Icon(_getStatusIcon(status), size: 12, color: statusColor),
+                        const SizedBox(width: 4),
+                        Text(
+                          status[0].toUpperCase() + status.substring(1).toLowerCase(),
+                          style: AppTextStyles.labelSmall.copyWith(
+                            color: statusColor,
+                            fontWeight: FontWeight.bold,
+                            fontSize: 10,
+                          ),
+                        ),
+                      ],
+                    ),
                   ),
-                ),
-              ]
+                  if (deviationText != null) ...[
+                    const SizedBox(height: 5),
+                    Text(
+                      deviationText,
+                      style: AppTextStyles.labelSmall.copyWith(
+                        color: statusColor,
+                        fontSize: 10,
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                  ],
+                ],
+              ),
             ],
           ),
+
+          // ── Notes — full text, wraps instead of being clipped ──
+          if (hasNotes) ...[
+            const SizedBox(height: 10),
+            Container(
+              width: double.infinity,
+              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+              decoration: BoxDecoration(
+                color: AppColors.background,
+                borderRadius: BorderRadius.circular(10),
+              ),
+              child: Row(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Icon(Icons.sticky_note_2_outlined,
+                      size: 14, color: AppColors.textSecondary),
+                  const SizedBox(width: 8),
+                  Expanded(
+                    child: Text(
+                      (log['notes'] as String).trim(),
+                      style: AppTextStyles.bodySmall.copyWith(
+                        color: AppColors.textSecondary,
+                        fontStyle: FontStyle.italic,
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ],
         ],
       ),
     );
@@ -373,6 +511,7 @@ class _FallbackAvatar extends StatelessWidget {
       width: 52,
       height: 52,
       color: color,
+      alignment: Alignment.center,
       child: Icon(
         Icons.medication_rounded,
         size: 24,
@@ -383,29 +522,27 @@ class _FallbackAvatar extends StatelessWidget {
 }
 
 // ══════════════════════════════════════════════════════════════
-// SKELETON LOADER
+// SKELETON LOADER — no separate Scaffold; renders inside the shared one
 // ══════════════════════════════════════════════════════════════
 class _HistorySkeleton extends StatelessWidget {
   const _HistorySkeleton();
 
   @override
   Widget build(BuildContext context) {
-    return Scaffold(
-      backgroundColor: AppColors.background,
-      body: ListView(
-        padding: const EdgeInsets.all(16),
-        children: const [
-          SkeletonBox(height: 24, width: 140),
-          SizedBox(height: 12),
-          SkeletonBox(height: 80, borderRadius: 16),
-          SizedBox(height: 10),
-          SkeletonBox(height: 80, borderRadius: 16),
-          SizedBox(height: 24),
-          SkeletonBox(height: 24, width: 100),
-          SizedBox(height: 12),
-          SkeletonBox(height: 80, borderRadius: 16),
-        ],
-      ),
+    return ListView(
+      physics: const NeverScrollableScrollPhysics(),
+      padding: const EdgeInsets.all(16),
+      children: const [
+        SkeletonBox(height: 20, width: 90, borderRadius: 6),
+        SizedBox(height: 12),
+        SkeletonBox(height: 84, borderRadius: 16),
+        SizedBox(height: 10),
+        SkeletonBox(height: 84, borderRadius: 16),
+        SizedBox(height: 24),
+        SkeletonBox(height: 20, width: 70, borderRadius: 6),
+        SizedBox(height: 12),
+        SkeletonBox(height: 84, borderRadius: 16),
+      ],
     );
   }
 }

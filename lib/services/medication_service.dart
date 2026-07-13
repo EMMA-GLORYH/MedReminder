@@ -101,7 +101,12 @@ class MedicationService {
 
     return supabase.storage.from('medication-images').getPublicUrl(path);
   }
-  /// Fetch all active medications for the current patient
+
+  /// Fetch ALL active medications for the current patient in one shot.
+  /// Kept unchanged for any existing callers that rely on a complete list
+  /// (e.g. dashboards). For the medications list screen itself, prefer
+  /// [getMyMedicationsPage] so the UI never has to render an unbounded
+  /// number of cards at once.
   Future<List<Medication>> getMyMedications() async {
     final userId = AuthService.instance.currentUser?.id;
 
@@ -126,6 +131,65 @@ class MedicationService {
           .toList();
     } catch (e) {
       debugPrint('❌ Failed to fetch medications: $e');
+      rethrow;
+    }
+  }
+
+  /// Fetch one indexed page of active medications, most recently added
+  /// first — e.g. offset: 0, limit: 12 gets items 0..11; offset: 12,
+  /// limit: 12 gets items 12..23. Backed by Postgres `.range()`, so only
+  /// the requested rows are ever transferred or rendered.
+  Future<List<Medication>> getMyMedicationsPage({
+    required int offset,
+    required int limit,
+  }) async {
+    final userId = AuthService.instance.currentUser?.id;
+
+    if (userId == null) {
+      throw Exception('Not logged in');
+    }
+
+    debugPrint('📋 Fetching medications page (offset=$offset, limit=$limit)');
+
+    try {
+      final data = await supabase
+          .from('medications')
+          .select()
+          .eq('patient_id', userId)
+          .eq('is_active', true)
+          .order('created_at', ascending: false)
+          .range(offset, offset + limit - 1);
+
+      return (data as List)
+          .map((json) => Medication.fromJson(json))
+          .toList();
+    } catch (e) {
+      debugPrint('❌ Failed to fetch medications page: $e');
+      rethrow;
+    }
+  }
+
+  /// Lightweight count of the patient's active medications, without
+  /// transferring any row data — used to show an accurate "N medications"
+  /// total in the header even though the list itself is paginated.
+  Future<int> getMedicationsCount() async {
+    final userId = AuthService.instance.currentUser?.id;
+
+    if (userId == null) {
+      throw Exception('Not logged in');
+    }
+
+    try {
+      final response = await supabase
+          .from('medications')
+          .select('id')
+          .eq('patient_id', userId)
+          .eq('is_active', true)
+          .count(CountOption.exact);
+
+      return response.count;
+    } catch (e) {
+      debugPrint('❌ Failed to count medications: $e');
       rethrow;
     }
   }

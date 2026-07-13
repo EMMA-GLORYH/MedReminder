@@ -1,6 +1,7 @@
-// lib/screens/home/caretaker/caretaker_dashboard_tab.dart
+// lib/home/caretaker/caretaker_dashboard_tab.dart
 
 import 'package:flutter/material.dart';
+import '../../gui/caretakers/pending_invites_screen.dart';
 import '../../models/profile.dart';
 import '../../services/auth_service.dart';
 import '../../theme/app_colors.dart';
@@ -28,7 +29,7 @@ class _CaretakerDashboardTabState extends State<CaretakerDashboardTab> {
     final profile = await AuthService.instance.getCurrentProfile();
     if (mounted) {
       setState(() {
-        _profile = profile;
+        _profile = profile as Profile?;
         _isLoading = false;
       });
     }
@@ -39,6 +40,13 @@ class _CaretakerDashboardTabState extends State<CaretakerDashboardTab> {
     if (hour < 12) return 'Good morning';
     if (hour < 17) return 'Good afternoon';
     return 'Good evening';
+  }
+
+  void _openPendingInvites() {
+    Navigator.push(
+      context,
+      MaterialPageRoute(builder: (_) => const PendingInvitesScreen()),
+    );
   }
 
   @override
@@ -212,8 +220,8 @@ class _CaretakerDashboardTabState extends State<CaretakerDashboardTab> {
             icon: Icons.person_add_rounded,
             iconColor: AppColors.primary,
             title: 'Link with a patient',
-            subtitle: 'Wait for a patient to invite you',
-            onTap: () {},
+            subtitle: 'View and respond to pending invites',
+            onTap: _openPendingInvites,
           ),
 
           const SizedBox(height: 8),
