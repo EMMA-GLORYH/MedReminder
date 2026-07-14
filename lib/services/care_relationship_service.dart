@@ -67,25 +67,44 @@ class CareRelationshipService {
         throw Exception('An invite is already pending for this person.');
       }
       if (s == 'revoked') {
-        // Re-invite: update the existing revoked row back to pending
-        debugPrint('🔄 Step 3 — Re-inviting previously revoked caretaker');
+        debugPrint(
+          '🔄 Re-inviting previously revoked caretaker',
+        );
+
+        final now = DateTime.now().toUtc().toIso8601String();
+
         final updated = await supabase
             .from('care_relationships')
             .update({
-          'status':               'pending',
-          'relationship':         relationship,
+          'status': 'pending',
+          'relationship': relationship,
+
+          // Restore the standard permissions for the new invitation.
+          'can_view_logs': true,
+          'can_view_medications': true,
+          'can_receive_alerts': true,
           'can_edit_medications': canEditMedications,
+
           'alert_threshold_mins': alertThresholdMins,
-          'invited_at':           DateTime.now().toIso8601String(),
-          'accepted_at':          null,
+          'invited_at': now,
+          'accepted_at': null,
         })
             .eq('id', existing['id'] as String)
+            .eq('patient_id', patientId)
+            .eq('status', 'revoked')
             .select()
-            .single();
+            .maybeSingle();
 
-        debugPrint('✅ Re-invite row updated: ${updated['id']}');
+        if (updated == null) {
+          throw Exception(
+            'The caretaker could not be invited again. Please refresh and retry.',
+          );
+        }
 
-        // Fire email notification (non-fatal if it fails)
+        debugPrint(
+          '✅ Revoked relationship restored to pending: ${updated['id']}',
+        );
+
         await _sendInviteEmail(updated['id'] as String);
 
         return CareRelationship.fromJson(updated);
@@ -323,25 +342,45 @@ class CareRelationshipService {
   }
 
   /// Accept — updates status to 'active' and stamps accepted_at
-  Future<CareRelationship> acceptInvite(String relationshipId) async {
-    final caregiverId = AuthService.instance.currentUser?.id;
-    if (caregiverId == null) throw Exception('Not logged in');
+  Future<CareRelationship> acceptInvite(
+      String relationshipId,
+      ) async {
+    final caregiverId =
+        AuthService.instance.currentUser?.id;
+
+    if (caregiverId == null) {
+      throw Exception('Not logged in');
+    }
 
     debugPrint('✅ Accepting invite: $relationshipId');
+
+    final now = DateTime.now().toUtc().toIso8601String();
 
     final data = await supabase
         .from('care_relationships')
         .update({
-      'status':      'active',
-      'accepted_at': DateTime.now().toIso8601String(),
-    })
-        .eq('id',           relationshipId)
-        .eq('caregiver_id', caregiverId)  // only the correct person can accept
-        .eq('status',       'pending')    // can only accept a pending invite
-        .select()
-        .single();
+      'status': 'active',
+      'accepted_at': now,
 
-    debugPrint('✅ Invite accepted — row: ${data['id']}, status: ${data['status']}');
+      // Every newly accepted invitation can receive SOS alerts.
+      'can_receive_alerts': true,
+    })
+        .eq('id', relationshipId)
+        .eq('caregiver_id', caregiverId)
+        .eq('status', 'pending')
+        .select()
+        .maybeSingle();
+
+    if (data == null) {
+      throw Exception(
+        'This invite is no longer pending or does not belong to you.',
+      );
+    }
+
+    debugPrint(
+      '✅ Invite accepted: ${data['id']}, status: ${data['status']}',
+    );
+
     return CareRelationship.fromJson(data);
   }
 
@@ -437,19 +476,162 @@ class CareRelationshipService {
   // ══════════════════════════════════════════════════════════════
   // REALTIME — live invite updates for caretaker
   // ══════════════════════════════════════════════════════════════
-  RealtimeChannel subscribeToMyInvites(void Function() onChanged) {
-    final caregiverId = AuthService.instance.currentUser?.id;
+  RealtimeChannel subscribeToMyInvites(
+      void Function() onChanged,
+      ) {
+    final caregiverId =
+        AuthService.instance.currentUser?.id;
 
     final channel = supabase.channel(
       'care_invites_${caregiverId ?? 'anon'}',
     );
 
-    channel.onPostgresChanges(
-      event:    PostgresChangeEvent.all,
-      schema:   'public',
-      table:    'care_relationships',
-      callback: (payload) => onChanged(),
-    ).subscribe();
+    if (caregiverId == null) {
+      return channel;
+    }
+
+    channel
+        .onPostgresChanges(
+      event: PostgresChangeEvent.all,
+      schema: 'public',
+      table: 'care_relationships',
+      filter: PostgresChangeFilter(
+        type: PostgresChangeFilterType.eq,
+        column: 'caregiver_id',
+        value: caregiverId,
+      ),
+      callback: (_) => onChanged(),
+    )
+        .subscribe();
+
+    return channel;
+  }
+
+  RealtimeChannel subscribeToMyCaretakers(
+      void Function() onChanged,
+      ) {
+    final patientId =
+        AuthService.instance.currentUser?.id;
+
+    final channel = supabase.channel(
+      'patient_caretakers_${patientId ?? 'anon'}',
+    );
+
+    if (patientId == null) {
+      return channel;
+    }
+
+    channel
+        .onPostgresChanges(
+      event: PostgresChangeEvent.all,
+      schema: 'public',
+      table: 'care_relationships',
+      filter: PostgresChangeFilter(
+        type: PostgresChangeFilterType.eq,
+        column: 'patient_id',
+        value: patientId,
+      ),
+      callback: (_) => onChanged(),
+    )
+        .subscribe();
+
+    return channel;
+  }
+
+// ══════════════════════════════════════════════════════════════
+// SOS SUPPORT
+// ══════════════════════════════════════════════════════════════
+
+  /// Returns active caregivers who are allowed to receive SOS alerts.
+  Future<List<Map<String, dynamic>>> getActiveAlertCaretakers() async {
+    final patientId = AuthService.instance.currentUser?.id;
+
+    if (patientId == null) {
+      throw Exception('Not logged in');
+    }
+
+    final data = await supabase
+        .from('care_relationships')
+        .select('''
+        id,
+        caregiver_id,
+        relationship,
+        status,
+        can_receive_alerts,
+        profiles!care_relationships_caregiver_id_fkey(
+          id,
+          full_name,
+          phone_number,
+          avatar_url
+        )
+      ''')
+        .eq('patient_id', patientId)
+        .eq('status', 'active')
+        .eq('can_receive_alerts', true)
+        .order('accepted_at', ascending: false);
+
+    return List<Map<String, dynamic>>.from(data);
+  }
+
+  /// Returns how many linked caregivers can currently receive an SOS.
+  Future<int> getActiveAlertCaretakerCount() async {
+    final patientId = AuthService.instance.currentUser?.id;
+
+    if (patientId == null) return 0;
+
+    try {
+      final response = await supabase
+          .from('care_relationships')
+          .select('id')
+          .eq('patient_id', patientId)
+          .eq('status', 'active')
+          .eq('can_receive_alerts', true)
+          .count(CountOption.exact);
+
+      return response.count;
+    } catch (error) {
+      debugPrint('❌ Failed to count alert caregivers: $error');
+      return 0;
+    }
+  }
+
+  /// WebSocket-backed stream of the caregiver's active patient count.
+  Stream<int> watchActivePatientCount() {
+    final caregiverId = AuthService.instance.currentUser?.id;
+
+    if (caregiverId == null) {
+      return Stream<int>.value(0);
+    }
+
+    return supabase
+        .from('care_relationships')
+        .stream(primaryKey: ['id'])
+        .eq('caregiver_id', caregiverId)
+        .map((rows) {
+      return rows.where((row) {
+        return row['status']?.toString() == 'active';
+      }).length;
+    });
+  }
+
+  /// Realtime relationship changes for patient or caregiver screens.
+  RealtimeChannel subscribeToCareRelationships(
+      void Function(PostgresChangePayload payload) onChanged,
+      ) {
+    final userId = AuthService.instance.currentUser?.id;
+
+    final channel = supabase.channel(
+      'care_relationships_realtime_${userId ?? 'anon'}',
+    );
+
+    channel
+        .onPostgresChanges(
+      event: PostgresChangeEvent.all,
+      schema: 'public',
+      table: 'care_relationships',
+      callback: onChanged,
+    )
+        .subscribe();
 
     return channel;
   }

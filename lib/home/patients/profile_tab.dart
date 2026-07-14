@@ -28,7 +28,7 @@ class _ProfileTabState extends State<ProfileTab> {
     final profile = await AuthService.instance.getCurrentProfile();
     if (mounted) {
       setState(() {
-        _profile = profile;
+        _profile = profile as Profile?;
         _isLoading = false;
       });
     }
