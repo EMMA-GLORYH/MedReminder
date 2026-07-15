@@ -14,26 +14,100 @@ import io.flutter.plugin.common.MethodChannel
 class MainActivity : FlutterActivity() {
 
     companion object {
-        private const val CHANNEL_NAME = "medication_tts_background"
+        private const val ALERT_CHANNEL_NAME =
+            "medication_tts_background"
+
+        private const val SCANNER_ROUTE_CHANNEL =
+            "medication_scanner_route"
+
+        private const val ACTION_OPEN_SCANNER =
+            "com.example.mar.OPEN_SCANNER"
+
         private const val LOG_TAG = "MAR_ALERTS"
 
-        const val MODE_MEDICATION_DUE = "medication_due"
-        const val MODE_PRIOR_REMINDER = "prior_reminder"
-        const val MODE_CARETAKER_SOS = "caretaker_sos"
+        const val MODE_MEDICATION_DUE =
+            "medication_due"
 
-        const val VIBRATION_CONTINUOUS = "continuous"
-        const val VIBRATION_FIVE_PULSES = "five_pulses"
-        const val VIBRATION_NONE = "none"
+        const val MODE_PRIOR_REMINDER =
+            "prior_reminder"
+
+        const val MODE_CARETAKER_SOS =
+            "caretaker_sos"
+
+        const val VIBRATION_CONTINUOUS =
+            "continuous"
+
+        const val VIBRATION_FIVE_PULSES =
+            "five_pulses"
+
+        const val VIBRATION_NONE =
+            "none"
     }
+
+    private var scannerRouteChannel: MethodChannel? = null
+
+    /*
+     * When Android starts MainActivity from a terminated state, Dart may
+     * not have registered its MethodChannel handler yet. Keep the payload
+     * here until Flutter explicitly requests it.
+     */
+    private var pendingScannerPayload: String? = null
 
     override fun configureFlutterEngine(
         flutterEngine: FlutterEngine
     ) {
         super.configureFlutterEngine(flutterEngine)
 
+        configureAlertChannel(flutterEngine)
+        configureScannerRouteChannel(flutterEngine)
+
+        /*
+         * Do not immediately call Flutter for a cold-start intent.
+         * Flutter may not yet have initialized LocalNotificationService,
+         * the global navigator, or its MethodChannel handler.
+         */
+        extractScannerPayload(intent)?.let { payload ->
+            pendingScannerPayload = payload
+
+            Log.d(
+                LOG_TAG,
+                "Stored initial scanner payload until Flutter is ready"
+            )
+        }
+    }
+
+    /*
+     * Called when MainActivity already exists because the activity uses
+     * singleTop and the alarm sends another OPEN_SCANNER intent.
+     */
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+
+        setIntent(intent)
+
+        val payload = extractScannerPayload(intent)
+            ?: return
+
+        pendingScannerPayload = payload
+
+        Log.d(
+            LOG_TAG,
+            "Received OPEN_SCANNER through onNewIntent"
+        )
+
+        dispatchPendingScannerPayload()
+    }
+
+    // ══════════════════════════════════════════════════════════════
+    // FLUTTER ALERT METHOD CHANNEL
+    // ══════════════════════════════════════════════════════════════
+
+    private fun configureAlertChannel(
+        flutterEngine: FlutterEngine
+    ) {
         MethodChannel(
             flutterEngine.dartExecutor.binaryMessenger,
-            CHANNEL_NAME
+            ALERT_CHANNEL_NAME
         ).setMethodCallHandler { call, result ->
             try {
                 when (call.method) {
@@ -62,7 +136,9 @@ class MainActivity : FlutterActivity() {
                         result.success(null)
                     }
 
-                    else -> result.notImplemented()
+                    else -> {
+                        result.notImplemented()
+                    }
                 }
             } catch (error: Exception) {
                 Log.e(
@@ -73,7 +149,8 @@ class MainActivity : FlutterActivity() {
 
                 result.error(
                     "NATIVE_ALERT_ERROR",
-                    error.message ?: "Native alert operation failed",
+                    error.message
+                        ?: "Native alert operation failed",
                     null
                 )
             }
@@ -81,10 +158,121 @@ class MainActivity : FlutterActivity() {
     }
 
     // ══════════════════════════════════════════════════════════════
+    // SCANNER ROUTE METHOD CHANNEL
+    // ══════════════════════════════════════════════════════════════
+
+    private fun configureScannerRouteChannel(
+        flutterEngine: FlutterEngine
+    ) {
+        scannerRouteChannel = MethodChannel(
+            flutterEngine.dartExecutor.binaryMessenger,
+            SCANNER_ROUTE_CHANNEL
+        ).also { channel ->
+            /*
+             * Flutter calls getInitialScannerPayload after it has:
+             * 1. registered its openScanner handler;
+             * 2. initialized the app;
+             * 3. created its root navigator.
+             */
+            channel.setMethodCallHandler { call, result ->
+                when (call.method) {
+                    "getInitialScannerPayload" -> {
+                        val payload = pendingScannerPayload
+
+                        if (!payload.isNullOrBlank()) {
+                            pendingScannerPayload = null
+
+                            Log.d(
+                                LOG_TAG,
+                                "Initial scanner payload delivered to Flutter"
+                            )
+                        }
+
+                        result.success(payload)
+                    }
+
+                    else -> {
+                        result.notImplemented()
+                    }
+                }
+            }
+        }
+    }
+
+    private fun extractScannerPayload(
+        sourceIntent: Intent?
+    ): String? {
+        if (sourceIntent?.action != ACTION_OPEN_SCANNER) {
+            return null
+        }
+
+        return sourceIntent
+            .getStringExtra("payload")
+            ?.trim()
+            ?.takeIf { it.isNotBlank() }
+    }
+
+    /*
+     * Used for a warm start, where Flutter should already have registered
+     * its method handler. If delivery fails, keep the payload so Flutter
+     * can retrieve it using getInitialScannerPayload.
+     */
+    private fun dispatchPendingScannerPayload() {
+        val payload = pendingScannerPayload
+            ?.takeIf { it.isNotBlank() }
+            ?: return
+
+        val channel = scannerRouteChannel
+            ?: return
+
+        channel.invokeMethod(
+            "openScanner",
+            payload,
+            object : MethodChannel.Result {
+                override fun success(result: Any?) {
+                    if (pendingScannerPayload == payload) {
+                        pendingScannerPayload = null
+                    }
+
+                    Log.d(
+                        LOG_TAG,
+                        "Scanner payload forwarded to Flutter"
+                    )
+                }
+
+                override fun error(
+                    errorCode: String,
+                    errorMessage: String?,
+                    errorDetails: Any?
+                ) {
+                    Log.e(
+                        LOG_TAG,
+                        "Flutter rejected scanner payload: " +
+                                "$errorCode, $errorMessage"
+                    )
+
+                    // Keep pendingScannerPayload for later retrieval.
+                }
+
+                override fun notImplemented() {
+                    Log.w(
+                        LOG_TAG,
+                        "Flutter scanner route handler is not ready"
+                    )
+
+                    // Keep pendingScannerPayload for later retrieval.
+                }
+            }
+        )
+    }
+
+    // ══════════════════════════════════════════════════════════════
     // SCHEDULED ALERT
     // ══════════════════════════════════════════════════════════════
 
-    private fun handleScheduleStart(call: MethodCall) {
+    private fun handleScheduleStart(
+        call: MethodCall
+    ) {
         val alarmId =
             call.argument<Number>("alarmId")
                 ?.toInt()
@@ -168,29 +356,36 @@ class MainActivity : FlutterActivity() {
         ttsRepeatCount: Int
     ) {
         val alarmManager =
-            getSystemService(Context.ALARM_SERVICE) as AlarmManager
+            getSystemService(
+                Context.ALARM_SERVICE
+            ) as AlarmManager
 
-        val intent =
-            Intent(this, TtsAlarmReceiver::class.java).apply {
+        val alarmIntent =
+            Intent(
+                this,
+                TtsAlarmReceiver::class.java
+            ).apply {
                 putExtra("alarmId", alarmId)
                 putExtra("message", message)
                 putExtra("payload", payload)
-
-                // New optional configuration.
                 putExtra("alertMode", alertMode)
                 putExtra("soundResource", soundResource)
                 putExtra("loopSound", loopSound)
                 putExtra("launchScanner", launchScanner)
                 putExtra("vibrationMode", vibrationMode)
-                putExtra("ttsRepeatCount", ttsRepeatCount)
+                putExtra(
+                    "ttsRepeatCount",
+                    ttsRepeatCount
+                )
             }
 
-        val pendingIntent = PendingIntent.getBroadcast(
-            this,
-            alarmId,
-            intent,
-            pendingIntentFlags()
-        )
+        val pendingIntent =
+            PendingIntent.getBroadcast(
+                this,
+                alarmId,
+                alarmIntent,
+                pendingIntentFlags()
+            )
 
         Log.d(
             LOG_TAG,
@@ -207,10 +402,10 @@ class MainActivity : FlutterActivity() {
 
         try {
             when {
-                Build.VERSION.SDK_INT >= Build.VERSION_CODES.S &&
-                        !alarmManager.canScheduleExactAlarms() -> {
-                    // Safe fallback when the user has not granted exact alarm
-                    // permission. This may be slightly delayed by Android.
+                Build.VERSION.SDK_INT >=
+                        Build.VERSION_CODES.S &&
+                        !alarmManager
+                            .canScheduleExactAlarms() -> {
                     alarmManager.setAndAllowWhileIdle(
                         AlarmManager.RTC_WAKEUP,
                         startAtMillis,
@@ -224,7 +419,8 @@ class MainActivity : FlutterActivity() {
                     )
                 }
 
-                Build.VERSION.SDK_INT >= Build.VERSION_CODES.M -> {
+                Build.VERSION.SDK_INT >=
+                        Build.VERSION_CODES.M -> {
                     alarmManager.setExactAndAllowWhileIdle(
                         AlarmManager.RTC_WAKEUP,
                         startAtMillis,
@@ -247,7 +443,9 @@ class MainActivity : FlutterActivity() {
                 error
             )
 
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+            if (Build.VERSION.SDK_INT >=
+                Build.VERSION_CODES.M
+            ) {
                 alarmManager.setAndAllowWhileIdle(
                     AlarmManager.RTC_WAKEUP,
                     startAtMillis,
@@ -267,7 +465,9 @@ class MainActivity : FlutterActivity() {
     // IMMEDIATE ALERT
     // ══════════════════════════════════════════════════════════════
 
-    private fun handleImmediateStart(call: MethodCall) {
+    private fun handleImmediateStart(
+        call: MethodCall
+    ) {
         val message =
             call.argument<String>("message")
                 ?: ""
@@ -328,19 +528,34 @@ class MainActivity : FlutterActivity() {
         vibrationMode: String,
         ttsRepeatCount: Int
     ) {
-        val intent =
-            Intent(this, TtsSpeakService::class.java).apply {
-                action = TtsSpeakService.ACTION_START
+        val serviceIntent =
+            Intent(
+                this,
+                TtsSpeakService::class.java
+            ).apply {
+                action =
+                    TtsSpeakService.ACTION_START
 
                 putExtra("message", message)
                 putExtra("payload", payload)
-
                 putExtra("alertMode", alertMode)
-                putExtra("soundResource", soundResource)
+                putExtra(
+                    "soundResource",
+                    soundResource
+                )
                 putExtra("loopSound", loopSound)
-                putExtra("launchScanner", launchScanner)
-                putExtra("vibrationMode", vibrationMode)
-                putExtra("ttsRepeatCount", ttsRepeatCount)
+                putExtra(
+                    "launchScanner",
+                    launchScanner
+                )
+                putExtra(
+                    "vibrationMode",
+                    vibrationMode
+                )
+                putExtra(
+                    "ttsRepeatCount",
+                    ttsRepeatCount
+                )
             }
 
         Log.d(
@@ -354,10 +569,12 @@ class MainActivity : FlutterActivity() {
                     "ttsRepeats=$ttsRepeatCount"
         )
 
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            startForegroundService(intent)
+        if (Build.VERSION.SDK_INT >=
+            Build.VERSION_CODES.O
+        ) {
+            startForegroundService(serviceIntent)
         } else {
-            startService(intent)
+            startService(serviceIntent)
         }
     }
 
@@ -365,21 +582,29 @@ class MainActivity : FlutterActivity() {
     // CANCELLATION
     // ══════════════════════════════════════════════════════════════
 
-    private fun cancelTtsAlarm(alarmId: Int) {
+    private fun cancelTtsAlarm(
+        alarmId: Int
+    ) {
         if (alarmId == 0) return
 
         val alarmManager =
-            getSystemService(Context.ALARM_SERVICE) as AlarmManager
+            getSystemService(
+                Context.ALARM_SERVICE
+            ) as AlarmManager
 
-        val intent =
-            Intent(this, TtsAlarmReceiver::class.java)
+        val alarmIntent =
+            Intent(
+                this,
+                TtsAlarmReceiver::class.java
+            )
 
-        val pendingIntent = PendingIntent.getBroadcast(
-            this,
-            alarmId,
-            intent,
-            pendingIntentFlags()
-        )
+        val pendingIntent =
+            PendingIntent.getBroadcast(
+                this,
+                alarmId,
+                alarmIntent,
+                pendingIntentFlags()
+            )
 
         alarmManager.cancel(pendingIntent)
         pendingIntent.cancel()
@@ -391,18 +616,39 @@ class MainActivity : FlutterActivity() {
     }
 
     private fun stopTtsService() {
-        // Stopping the service invokes onDestroy(), which already calls
-        // stopEverything() in your working TtsSpeakService.
-        stopService(
+        /*
+         * Sending ACTION_STOP guarantees that the service executes
+         * stopEverything(), including audio, vibration and flashlight.
+         */
+        val stopIntent =
             Intent(
                 this,
                 TtsSpeakService::class.java
+            ).apply {
+                action =
+                    TtsSpeakService.ACTION_STOP
+            }
+
+        try {
+            startService(stopIntent)
+        } catch (error: Exception) {
+            Log.w(
+                LOG_TAG,
+                "Could not send ACTION_STOP; stopping service directly",
+                error
             )
-        )
+
+            stopService(
+                Intent(
+                    this,
+                    TtsSpeakService::class.java
+                )
+            )
+        }
 
         Log.d(
             LOG_TAG,
-            "Stopped TTS alert service"
+            "Requested TTS alert service stop"
         )
     }
 
@@ -413,17 +659,26 @@ class MainActivity : FlutterActivity() {
     private fun defaultSoundResource(
         alertMode: String
     ): String {
-        return when (alertMode) {
-            MODE_PRIOR_REMINDER -> "prior_reminder"
-            MODE_CARETAKER_SOS -> "caretaker_sos"
-            else -> "alarm"
+        return when (
+            alertMode.trim().lowercase()
+        ) {
+            MODE_PRIOR_REMINDER ->
+                "prior_reminder"
+
+            MODE_CARETAKER_SOS ->
+                "caretaker_sos"
+
+            else ->
+                "alarm"
         }
     }
 
     private fun defaultLoopSound(
         alertMode: String
     ): Boolean {
-        return when (alertMode) {
+        return when (
+            alertMode.trim().lowercase()
+        ) {
             MODE_PRIOR_REMINDER -> false
             MODE_CARETAKER_SOS -> true
             else -> true
@@ -434,14 +689,19 @@ class MainActivity : FlutterActivity() {
         alertMode: String,
         payload: String
     ): Boolean {
-        return alertMode == MODE_MEDICATION_DUE &&
+        return alertMode
+            .trim()
+            .lowercase() ==
+                MODE_MEDICATION_DUE &&
                 payload.isNotBlank()
     }
 
     private fun defaultVibrationMode(
         alertMode: String
     ): String {
-        return when (alertMode) {
+        return when (
+            alertMode.trim().lowercase()
+        ) {
             MODE_PRIOR_REMINDER ->
                 VIBRATION_FIVE_PULSES
 

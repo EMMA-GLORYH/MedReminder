@@ -9,6 +9,8 @@ import android.app.PendingIntent
 import android.app.Service
 import android.content.Context
 import android.content.Intent
+import android.hardware.camera2.CameraCharacteristics
+import android.hardware.camera2.CameraManager
 import android.media.AudioAttributes
 import android.media.AudioManager
 import android.media.MediaPlayer
@@ -45,12 +47,11 @@ class TtsSpeakService : Service(), TextToSpeech.OnInitListener {
 
         private const val DEFAULT_TTS_REPEAT_COUNT = 3
         private const val GAP_BETWEEN_SPEAKS_MS = 600L
+        private const val FLASH_TOGGLE_INTERVAL_MS = 400L // Strobe interval in milliseconds
 
         /*
          * Continuous heavy vibration.
-         *
-         * The repeat index is 0, so Android repeats this pattern until
-         * ACTION_STOP is received.
+         * index 0 restarts this sequence until ACTION_STOP is received.
          */
         private val CONTINUOUS_VIBRATION_PATTERN = longArrayOf(
             0L,
@@ -62,10 +63,7 @@ class TtsSpeakService : Service(), TextToSpeech.OnInitListener {
         )
 
         /*
-         * Five distinct vibration pulses.
-         *
-         * This pattern is not repeated. It is used for the ten-minute
-         * prior medication reminder.
+         * Five prior-reminder vibration pulses, without repeat.
          */
         private val FIVE_PULSE_VIBRATION_PATTERN = longArrayOf(
             0L,
@@ -82,6 +80,12 @@ class TtsSpeakService : Service(), TextToSpeech.OnInitListener {
     private var handler: Handler? = null
     private var vibrator: Vibrator? = null
 
+    // Torch / Flashlight state
+    private var cameraManager: CameraManager? = null
+    private var cameraId: String? = null
+    private var isTorchOn: Boolean = false
+    private var flashRunnable: Runnable? = null
+
     private var message: String = ""
     private var payload: String = ""
 
@@ -96,12 +100,15 @@ class TtsSpeakService : Service(), TextToSpeech.OnInitListener {
     private var isReady: Boolean = false
     private var speakCount: Int = 0
 
-    // Prevents callbacks from an older alert from continuing a newer session.
+    /*
+     * Each ACTION_START increments the session. Callbacks from a previous
+     * alert can no longer continue after a newer alert begins.
+     */
     private var alertSessionId: Long = 0L
 
-    // ──────────────────────────────────────────────────────────
+    // ──────────────────────────────────────────────────────────────
     // Lifecycle
-    // ──────────────────────────────────────────────────────────
+    // ──────────────────────────────────────────────────────────────
 
     override fun onCreate() {
         super.onCreate()
@@ -110,6 +117,7 @@ class TtsSpeakService : Service(), TextToSpeech.OnInitListener {
 
         handler = Handler(Looper.getMainLooper())
         vibrator = getVibrator()
+        initCameraManager()
     }
 
     override fun onStartCommand(
@@ -125,14 +133,22 @@ class TtsSpeakService : Service(), TextToSpeech.OnInitListener {
             return START_NOT_STICKY
         }
 
-        // Increment the session so callbacks from a previous alert can
-        // no longer continue the old speech/sound sequence.
         alertSessionId = System.currentTimeMillis()
 
-        message = intent?.getStringExtra("message").orEmpty()
-        payload = intent?.getStringExtra("payload").orEmpty()
+        message = intent
+            ?.getStringExtra("message")
+            ?.trim()
+            .orEmpty()
 
-        alertMode = intent?.getStringExtra("alertMode")
+        payload = intent
+            ?.getStringExtra("payload")
+            .orEmpty()
+
+        alertMode = intent
+            ?.getStringExtra("alertMode")
+            ?.trim()
+            ?.lowercase()
+            ?.takeIf { it.isNotBlank() }
             ?: MODE_MEDICATION_DUE
 
         soundResource = getValidResourceName(
@@ -164,7 +180,10 @@ class TtsSpeakService : Service(), TextToSpeech.OnInitListener {
             )
         }
 
-        vibrationMode = intent?.getStringExtra("vibrationMode")
+        vibrationMode = intent
+            ?.getStringExtra("vibrationMode")
+            ?.trim()
+            ?.takeIf { it.isNotBlank() }
             ?: defaultVibrationMode(alertMode)
 
         ttsRepeatCount = intent
@@ -189,10 +208,8 @@ class TtsSpeakService : Service(), TextToSpeech.OnInitListener {
         )
 
         /*
-         * Existing medication behavior is preserved:
-         * medication_due + payload automatically opens the scanner.
-         *
-         * prior_reminder and caretaker_sos default to no scanner.
+         * Exact medication reminders launch the confirmation/scanner
+         * automatically. SOS and prior reminders do not.
          */
         if (launchScanner && payload.isNotBlank()) {
             launchScannerScreen(payload)
@@ -205,20 +222,92 @@ class TtsSpeakService : Service(), TextToSpeech.OnInitListener {
 
         stopAudioOnly()
         stopVibration()
+        stopFlashlight()
 
         startVibration()
 
         /*
-         * If no TTS repetitions were requested, go directly to the
-         * selected sound resource.
+         * Flash physical LED only for high-priority alerts (Medication Due & SOS).
+         */
+        if (alertMode == MODE_MEDICATION_DUE || alertMode == MODE_CARETAKER_SOS) {
+            startFlashlightStrobe()
+        }
+
+        /*
+         * Medication and SOS use configured speech repetition.
+         * If speech is not required or unavailable, skip to sound.
          */
         if (ttsRepeatCount <= 0 || message.isBlank()) {
             startSelectedSound()
         } else {
-            tts = TextToSpeech(this, this)
+            startTts()
         }
 
         return START_STICKY
+    }
+
+    // ──────────────────────────────────────────────────────────────
+    // Flashlight Controller
+    // ──────────────────────────────────────────────────────────────
+
+    private fun initCameraManager() {
+        try {
+            cameraManager = getSystemService(Context.CAMERA_SERVICE) as? CameraManager
+            val ids = cameraManager?.cameraIdList ?: emptyArray()
+            for (id in ids) {
+                val characteristics = cameraManager?.getCameraCharacteristics(id)
+                val hasFlash = characteristics?.get(CameraCharacteristics.FLASH_INFO_AVAILABLE) == true
+                val facing = characteristics?.get(CameraCharacteristics.LENS_FACING)
+                if (hasFlash && facing == CameraCharacteristics.LENS_FACING_BACK) {
+                    cameraId = id
+                    break
+                }
+            }
+        } catch (e: Exception) {
+            Log.e(LOG_TAG, "Could not initialize camera flash", e)
+        }
+    }
+
+    private fun startFlashlightStrobe() {
+        val targetCamId = cameraId ?: return
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M) return
+
+        flashRunnable = object : Runnable {
+            override fun run() {
+                try {
+                    isTorchOn = !isTorchOn
+                    cameraManager?.setTorchMode(targetCamId, isTorchOn)
+                    handler?.postDelayed(this, FLASH_TOGGLE_INTERVAL_MS)
+                } catch (e: Exception) {
+                    Log.e(LOG_TAG, "Torch mode error", e)
+                }
+            }
+        }
+        handler?.post(flashRunnable as Runnable)
+        Log.d(LOG_TAG, "Camera flashlight strobe started")
+    }
+
+    private fun stopFlashlight() {
+        flashRunnable?.let { handler?.removeCallbacks(it) }
+        flashRunnable = null
+
+        val targetCamId = cameraId
+        if (targetCamId != null && Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+            try {
+                cameraManager?.setTorchMode(targetCamId, false)
+            } catch (_: Exception) {}
+        }
+        isTorchOn = false
+    }
+
+    // ──────────────────────────────────────────────────────────────
+    // Text-to-Speech initialization
+    // ──────────────────────────────────────────────────────────────
+
+    private fun startTts() {
+        shutdownTts()
+
+        tts = TextToSpeech(this, this)
     }
 
     override fun onInit(status: Int) {
@@ -228,7 +317,7 @@ class TtsSpeakService : Service(), TextToSpeech.OnInitListener {
                 "TTS initialization failed; starting fallback sound"
             )
 
-            isReady = false
+            shutdownTts()
             startSelectedSound()
             return
         }
@@ -268,6 +357,11 @@ class TtsSpeakService : Service(), TextToSpeech.OnInitListener {
                     "Deprecated in Java, but still required"
                 )
                 override fun onError(utteranceId: String?) {
+                    Log.e(
+                        LOG_TAG,
+                        "TTS reported legacy error"
+                    )
+
                     handler?.post {
                         if (sessionId == alertSessionId) {
                             onSpeechFinished()
@@ -295,10 +389,6 @@ class TtsSpeakService : Service(), TextToSpeech.OnInitListener {
 
         speakOnce()
     }
-
-    // ──────────────────────────────────────────────────────────
-    // Text-to-speech
-    // ──────────────────────────────────────────────────────────
 
     private fun speakOnce() {
         if (!isReady ||
@@ -328,19 +418,23 @@ class TtsSpeakService : Service(), TextToSpeech.OnInitListener {
 
         if (result == TextToSpeech.ERROR) {
             Log.e(LOG_TAG, "Could not start TTS speech")
-            onSpeechFinished()
+
+            shutdownTts()
+            startSelectedSound()
         }
     }
 
     private fun onSpeechFinished() {
-        speakCount++
+        if (speakCount + 1 < ttsRepeatCount) {
+            speakCount++
 
-        if (speakCount < ttsRepeatCount) {
             handler?.postDelayed(
                 { speakOnce() },
                 GAP_BETWEEN_SPEAKS_MS
             )
         } else {
+            speakCount = ttsRepeatCount
+
             Log.d(
                 LOG_TAG,
                 "TTS completed $ttsRepeatCount repetition(s)"
@@ -351,9 +445,9 @@ class TtsSpeakService : Service(), TextToSpeech.OnInitListener {
         }
     }
 
-    // ──────────────────────────────────────────────────────────
-    // Selected MP3 sound
-    // ──────────────────────────────────────────────────────────
+    // ──────────────────────────────────────────────────────────────
+    // MP3 playback
+    // ──────────────────────────────────────────────────────────────
 
     private fun startSelectedSound() {
         stopMediaPlayerOnly()
@@ -361,17 +455,10 @@ class TtsSpeakService : Service(), TextToSpeech.OnInitListener {
         val requestedResourceName =
             normalizeResourceName(soundResource)
 
-        var resourceId = resources.getIdentifier(
-            requestedResourceName,
-            "raw",
-            packageName
+        var resourceId = getRawResourceId(
+            requestedResourceName
         )
 
-        /*
-         * If prior_reminder.mp3 or caretaker_sos.mp3 is missing,
-         * fall back to the existing alarm.mp3 so the alert remains
-         * audible instead of silently failing.
-         */
         if (resourceId == 0) {
             Log.e(
                 LOG_TAG,
@@ -379,11 +466,7 @@ class TtsSpeakService : Service(), TextToSpeech.OnInitListener {
                         "falling back to alarm"
             )
 
-            resourceId = resources.getIdentifier(
-                "alarm",
-                "raw",
-                packageName
-            )
+            resourceId = getRawResourceId("alarm")
         }
 
         if (resourceId == 0) {
@@ -418,9 +501,9 @@ class TtsSpeakService : Service(), TextToSpeech.OnInitListener {
 
                 fileDescriptor.close()
 
-                setOnPreparedListener {
+                setOnPreparedListener { player ->
                     setAlarmStreamToMaximum()
-                    it.start()
+                    player.start()
 
                     Log.d(
                         LOG_TAG,
@@ -432,8 +515,8 @@ class TtsSpeakService : Service(), TextToSpeech.OnInitListener {
 
                 setOnCompletionListener {
                     /*
-                     * Prior reminders use a non-looping sound. After the
-                     * MP3 finishes, the service can stop automatically.
+                     * Non-looping prior reminders stop automatically when
+                     * their MP3 finishes.
                      */
                     if (!loopSound) {
                         handler?.post {
@@ -478,7 +561,7 @@ class TtsSpeakService : Service(), TextToSpeech.OnInitListener {
     private fun normalizeResourceName(
         rawName: String
     ): String {
-        val normalized = rawName
+        return rawName
             .trim()
             .lowercase()
             .removeSuffix(".mp3")
@@ -486,10 +569,9 @@ class TtsSpeakService : Service(), TextToSpeech.OnInitListener {
                 Regex("[^a-z0-9_]"),
                 "_"
             )
-
-        return normalized.ifBlank {
-            defaultSoundResource(alertMode)
-        }
+            .ifBlank {
+                defaultSoundResource(alertMode)
+            }
     }
 
     private fun getValidResourceName(
@@ -497,11 +579,7 @@ class TtsSpeakService : Service(), TextToSpeech.OnInitListener {
     ): String {
         val normalized = normalizeResourceName(rawName)
 
-        val resourceId = resources.getIdentifier(
-            normalized,
-            "raw",
-            packageName
-        )
+        val resourceId = getRawResourceId(normalized)
 
         if (resourceId == 0) {
             return "alarm"
@@ -510,9 +588,19 @@ class TtsSpeakService : Service(), TextToSpeech.OnInitListener {
         return normalized
     }
 
-    // ──────────────────────────────────────────────────────────
-    // Scanner launch
-    // ──────────────────────────────────────────────────────────
+    private fun getRawResourceId(
+        resourceName: String
+    ): Int {
+        return resources.getIdentifier(
+            resourceName,
+            "raw",
+            packageName
+        )
+    }
+
+    // ──────────────────────────────────────────────────────────────
+    // Scanner / confirmation screen launch
+    // ──────────────────────────────────────────────────────────────
 
     private fun launchScannerScreen(
         scannerPayload: String
@@ -546,12 +634,12 @@ class TtsSpeakService : Service(), TextToSpeech.OnInitListener {
         }
     }
 
-    // ──────────────────────────────────────────────────────────
+    // ──────────────────────────────────────────────────────────────
     // Vibration
-    // ──────────────────────────────────────────────────────────
+    // ──────────────────────────────────────────────────────────────
 
     private fun startVibration() {
-        when (vibrationMode) {
+        when (vibrationMode.trim().lowercase()) {
             VIBRATION_NONE -> {
                 stopVibration()
             }
@@ -584,6 +672,14 @@ class TtsSpeakService : Service(), TextToSpeech.OnInitListener {
         val activeVibrator = vibrator ?: return
 
         try {
+            if (!activeVibrator.hasVibrator()) {
+                Log.w(
+                    LOG_TAG,
+                    "Device reports no vibrator"
+                )
+                return
+            }
+
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
                 activeVibrator.vibrate(
                     VibrationEffect.createWaveform(
@@ -614,9 +710,9 @@ class TtsSpeakService : Service(), TextToSpeech.OnInitListener {
         }
     }
 
-    // ──────────────────────────────────────────────────────────
-    // Audio control
-    // ──────────────────────────────────────────────────────────
+    // ──────────────────────────────────────────────────────────────
+    // Audio management
+    // ──────────────────────────────────────────────────────────────
 
     private fun setAlarmStreamToMaximum() {
         try {
@@ -675,17 +771,18 @@ class TtsSpeakService : Service(), TextToSpeech.OnInitListener {
     }
 
     private fun stopEverything() {
-        // Invalidates all callbacks from the current alert.
         alertSessionId = System.currentTimeMillis()
 
         stopAudioOnly()
         stopVibration()
+        stopFlashlight()
 
         speakCount = 0
 
         try {
             if (Build.VERSION.SDK_INT >=
-                Build.VERSION_CODES.N) {
+                Build.VERSION_CODES.N
+            ) {
                 stopForeground(
                     STOP_FOREGROUND_REMOVE
                 )
@@ -704,13 +801,14 @@ class TtsSpeakService : Service(), TextToSpeech.OnInitListener {
 
     override fun onBind(intent: Intent?): IBinder? = null
 
-    // ──────────────────────────────────────────────────────────
+    // ──────────────────────────────────────────────────────────────
     // Foreground notification
-    // ──────────────────────────────────────────────────────────
+    // ──────────────────────────────────────────────────────────────
 
     private fun createNotificationChannel() {
         if (Build.VERSION.SDK_INT <
-            Build.VERSION_CODES.O) {
+            Build.VERSION_CODES.O
+        ) {
             return
         }
 
@@ -720,7 +818,7 @@ class TtsSpeakService : Service(), TextToSpeech.OnInitListener {
             NotificationManager.IMPORTANCE_HIGH
         ).apply {
             description =
-                "Spoken medication reminders and emergency SOS alerts"
+                "Spoken medication reminders and emergency alerts"
 
             setBypassDnd(true)
             enableVibration(true)
@@ -751,8 +849,7 @@ class TtsSpeakService : Service(), TextToSpeech.OnInitListener {
 
                     putExtra("payload", payload)
                 } else {
-                    action =
-                        Intent.ACTION_MAIN
+                    action = Intent.ACTION_MAIN
                 }
             }
 
@@ -843,11 +940,12 @@ class TtsSpeakService : Service(), TextToSpeech.OnInitListener {
             )
 
         /*
-         * Only the exact medication reminder opens the scanner over
-         * the lock screen. Prior reminders and caretaker SOS do not
-         * accidentally open the scanner.
+         * Full-screen only belongs to exact medication reminders.
+         * SOS alerts do not automatically open the scanner; they appear in
+         * the caretaker Alerts tab and over the normal audible alert.
          */
-        if (launchScanner &&
+        if (alertMode == MODE_MEDICATION_DUE &&
+            launchScanner &&
             payload.isNotBlank()
         ) {
             builder.setFullScreenIntent(
@@ -859,9 +957,9 @@ class TtsSpeakService : Service(), TextToSpeech.OnInitListener {
         return builder.build()
     }
 
-    // ──────────────────────────────────────────────────────────
+    // ──────────────────────────────────────────────────────────────
     // Vibrator compatibility
-    // ──────────────────────────────────────────────────────────
+    // ──────────────────────────────────────────────────────────────
 
     private fun getVibrator(): Vibrator? {
         return if (
@@ -881,14 +979,14 @@ class TtsSpeakService : Service(), TextToSpeech.OnInitListener {
         }
     }
 
-    // ──────────────────────────────────────────────────────────
+    // ──────────────────────────────────────────────────────────────
     // Backward-compatible defaults
-    // ──────────────────────────────────────────────────────────
+    // ──────────────────────────────────────────────────────────────
 
     private fun defaultSoundResource(
         mode: String
     ): String {
-        return when (mode) {
+        return when (mode.trim().lowercase()) {
             MODE_PRIOR_REMINDER ->
                 "prior_reminder"
 
@@ -903,7 +1001,7 @@ class TtsSpeakService : Service(), TextToSpeech.OnInitListener {
     private fun defaultLoopSound(
         mode: String
     ): Boolean {
-        return when (mode) {
+        return when (mode.trim().lowercase()) {
             MODE_PRIOR_REMINDER -> false
             MODE_CARETAKER_SOS -> true
             else -> true
@@ -914,14 +1012,15 @@ class TtsSpeakService : Service(), TextToSpeech.OnInitListener {
         mode: String,
         scannerPayload: String
     ): Boolean {
-        return mode == MODE_MEDICATION_DUE &&
+        return mode.trim().lowercase() ==
+                MODE_MEDICATION_DUE &&
                 scannerPayload.isNotBlank()
     }
 
     private fun defaultVibrationMode(
         mode: String
     ): String {
-        return when (mode) {
+        return when (mode.trim().lowercase()) {
             MODE_PRIOR_REMINDER ->
                 VIBRATION_FIVE_PULSES
 
