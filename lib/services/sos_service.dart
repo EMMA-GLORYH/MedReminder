@@ -2,6 +2,7 @@
 
 import 'package:flutter/foundation.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
+import 'sos_location_service.dart';
 
 import '../main.dart';
 import 'auth_service.dart';
@@ -150,11 +151,25 @@ class SosService {
         );
       }
 
+      final location =
+      await SosLocationService.instance.getCurrentLocation();
+
+      debugPrint(
+        location == null
+            ? '⚠️ SOS will be sent without location'
+            : '📍 SOS location: '
+            '${location.latitude}, ${location.longitude} '
+            '±${location.accuracy.toStringAsFixed(0)}m',
+      );
+
       final response = await supabase.rpc(
         'create_sos_alerts',
         params: {
           'p_request_key': requestKey,
           'p_message': message,
+          'p_latitude': location?.latitude,
+          'p_longitude': location?.longitude,
+          'p_accuracy_m': location?.accuracy,
         },
       );
 
@@ -238,6 +253,11 @@ class SosService {
             phone_number,
             avatar_url
           )
+          patient_name,
+          latitude,
+          longitude,
+          location_accuracy_m,
+          location_captured_at,
           ''',
     )
         .eq('caregiver_id', caregiverId)
