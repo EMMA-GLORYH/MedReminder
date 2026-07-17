@@ -1,5 +1,6 @@
 // lib/services/local_notification_service.dart
 
+import 'dart:async';
 import 'dart:convert';
 import 'dart:typed_data';
 
@@ -17,7 +18,7 @@ import 'dose_log_service.dart';
 import 'medication_tts_service.dart';
 import 'schedule_service.dart';
 
-// Channel used by MainActivity to instruct Flutter to open the reminder screen.
+// This name must match SCANNER_ROUTE_CHANNEL in MainActivity.kt.
 const MethodChannel _scannerRouteChannel = MethodChannel(
   'medication_scanner_route',
 );
@@ -32,25 +33,29 @@ class LocalNotificationService {
   FlutterLocalNotificationsPlugin();
 
   bool _initialized = false;
+  Future<void>? _initializationFuture;
 
-  // Versioned channels are used because Android notification-channel
-  // sound and vibration settings cannot be changed after creation.
-  //
-  // Native TtsSpeakService owns audio and vibration. These channels are
-  // visual notification channels only, preventing duplicate sound.
+  // Scanner payloads can arrive before MaterialApp has created the root navigator.
+  final List<String> _pendingScannerPayloads = <String>[];
+
+  // Prevent duplicate opening.
+  final Set<String> _queuedScannerKeys = <String>{};
+
+  bool _isDrainingScannerQueue = false;
+
+  // Versioned channels are used because Android notification-channel properties
+  // cannot be changed after creation.
   static const String _reminderChannelId =
       'medication_prior_visual_v2';
 
   static const String _urgentChannelId =
       'medication_due_visual_v2';
 
-  // Notification vibration is disabled because native TtsSpeakService
-  // already handles the requested patterns.
   static final Int64List _noVibration = Int64List.fromList(
     const <int>[0],
   );
 
-  // Stable step IDs.
+  // Stable notification/alarm IDs steps.
   static const int _dueNotificationStep = 0;
   static const int _legacyEscalationStep1 = 1;
   static const int _legacyEscalationStep2 = 2;
@@ -69,16 +74,38 @@ class LocalNotificationService {
   // INITIALIZATION
   // ══════════════════════════════════════════════════════════════
 
-  Future<void> init() async {
-    if (_initialized) return;
+  Future<void> init() {
+    if (_initialized) {
+      return Future<void>.value();
+    }
+    return _initializationFuture ??= _performInitialization();
+  }
+
+  Future<void> _performInitialization() async {
+    // Register scanner handler early.
+    _scannerRouteChannel.setMethodCallHandler(
+          (MethodCall call) async {
+        if (call.method != 'openScanner') {
+          return false;          // <-- fixed
+        }
+
+        final payload = call.arguments is String
+            ? call.arguments as String
+            : null;
+
+        if (payload == null || payload.trim().isEmpty) {
+          return false;
+        }
+
+        _queueScannerPayload(payload);
+        return true;
+      },
+    );
 
     tz.initializeTimeZones();
-
-    // This preserves your current working timezone configuration.
     tz.setLocalLocation(tz.getLocation('UTC'));
 
-    const androidInitialization =
-    AndroidInitializationSettings(
+    const androidInitialization = AndroidInitializationSettings(
       '@mipmap/ic_launcher',
     );
 
@@ -93,21 +120,14 @@ class LocalNotificationService {
         android: androidInitialization,
         iOS: iosInitialization,
       ),
-      onDidReceiveNotificationResponse:
-      _onNotificationTapped,
-      onDidReceiveBackgroundNotificationResponse:
-      _onNotificationTapped,
+      onDidReceiveNotificationResponse: _onNotificationTapped,
+      onDidReceiveBackgroundNotificationResponse: _onNotificationTapped,
     );
 
-    final androidPlugin = _plugin
-        .resolvePlatformSpecificImplementation<
+    final androidPlugin = _plugin.resolvePlatformSpecificImplementation<
         AndroidFlutterLocalNotificationsPlugin>();
 
     if (androidPlugin != null) {
-      // Visual due-dose channel.
-      //
-      // Sound and vibration are disabled here because the native
-      // TtsSpeakService provides the TTS, MP3, and vibration.
       await androidPlugin.createNotificationChannel(
         const AndroidNotificationChannel(
           _urgentChannelId,
@@ -124,7 +144,6 @@ class LocalNotificationService {
         ),
       );
 
-      // Visual prior-reminder channel.
       await androidPlugin.createNotificationChannel(
         const AndroidNotificationChannel(
           _reminderChannelId,
@@ -145,31 +164,179 @@ class LocalNotificationService {
       await androidPlugin.requestExactAlarmsPermission();
     }
 
-    // Native alarm auto-launch route.
-    _scannerRouteChannel.setMethodCallHandler(
-          (call) async {
-        if (call.method != 'openScanner') return;
-
-        final payload = call.arguments as String?;
-
-        if (payload == null || payload.trim().isEmpty) {
-          return;
-        }
-
-        await _openScannerFromPayload(payload);
-      },
-    );
-
     _initialized = true;
+
+    // Retrieve cold-start payload from MainActivity.
+    await _retrieveInitialNativeScannerPayload();
+
+    // Also handle cold start from a tapped visual notification.
+    await _processNotificationLaunchDetails();
 
     debugPrint('✅ LocalNotificationService initialized');
   }
 
+  Future<void> _retrieveInitialNativeScannerPayload() async {
+    try {
+      final initialPayload =
+      await _scannerRouteChannel.invokeMethod<String>(
+        'getInitialScannerPayload',
+      );
+
+      if (initialPayload == null ||
+          initialPayload.trim().isEmpty) {
+        return;
+      }
+
+      debugPrint('📥 Received initial scanner payload from MainActivity');
+      _queueScannerPayload(initialPayload);
+    } on MissingPluginException {
+      debugPrint('⚠️ Native scanner route channel is unavailable');
+    } on PlatformException catch (error) {
+      debugPrint(
+        '⚠️ Could not retrieve initial scanner payload: '
+            '${error.message}',
+      );
+    } catch (error, stack) {
+      debugPrint(
+        '⚠️ Could not retrieve initial scanner payload: $error',
+      );
+      debugPrint('$stack');
+    }
+  }
+
+  Future<void> _processNotificationLaunchDetails() async {
+    try {
+      final launchDetails =
+      await _plugin.getNotificationAppLaunchDetails();
+
+      if (launchDetails?.didNotificationLaunchApp != true) {
+        return;
+      }
+
+      final response = launchDetails?.notificationResponse;
+      if (response == null) return;
+
+      await _handleNotificationResponse(response);
+    } catch (error, stack) {
+      debugPrint(
+        '⚠️ Could not process notification launch details: '
+            '$error',
+      );
+      debugPrint('$stack');
+    }
+  }
+
   // ══════════════════════════════════════════════════════════════
-  // SCHEDULE A DOSE
+  // SCANNER ROUTE QUEUE
+  // ══════════════════════════════════════════════════════════════
+
+  void _queueScannerPayload(String rawPayload) {
+    final payload = rawPayload.trim();
+    if (payload.isEmpty) return;
+
+    try {
+      final decoded = jsonDecode(payload);
+      if (decoded is! Map<String, dynamic>) {
+        throw const FormatException(
+          'Scanner payload must be a JSON object',
+        );
+      }
+
+      final alertType =
+          decoded['alertType']?.toString() ?? 'medication_due';
+
+      if (alertType == 'prior_reminder') {
+        debugPrint('ℹ️ Scanner route ignored for prior reminder');
+        return;
+      }
+
+      final scannerKey = _scannerKey(decoded);
+
+      if (_queuedScannerKeys.contains(scannerKey)) {
+        debugPrint(
+          'ℹ️ Duplicate scanner request ignored: $scannerKey',
+        );
+        return;
+      }
+
+      _queuedScannerKeys.add(scannerKey);
+      _pendingScannerPayloads.add(payload);
+
+      debugPrint(
+        '📥 Medication scanner request queued: $scannerKey',
+      );
+
+      unawaited(_drainScannerQueue());
+    } catch (error) {
+      debugPrint('❌ Invalid scanner payload: $error');
+    }
+  }
+
+  String _scannerKey(Map<String, dynamic> data) {
+    final patientId = data['patientId']?.toString() ?? '';
+    final scheduleId = data['scheduleId']?.toString() ?? '';
+    final medicationId = data['medicationId']?.toString() ?? '';
+    final scheduledFor =
+        data['scheduledFor']?.toString() ??
+            data['scheduledForMillis']?.toString() ??
+            '';
+
+    return '$patientId|$scheduleId|$medicationId|$scheduledFor';
+  }
+
+  Future<void> _drainScannerQueue() async {
+    if (_isDrainingScannerQueue) return;
+    _isDrainingScannerQueue = true;
+
+    try {
+      while (_pendingScannerPayloads.isNotEmpty) {
+        final navigator = navigatorKey.currentState;
+
+        if (navigator == null || !navigator.mounted) {
+          await Future<void>.delayed(
+            const Duration(milliseconds: 250),
+          );
+          continue;
+        }
+
+        final payload = _pendingScannerPayloads.removeAt(0);
+
+        String? scannerKey;
+        try {
+          final decoded = jsonDecode(payload);
+          if (decoded is Map<String, dynamic>) {
+            scannerKey = _scannerKey(decoded);
+          }
+
+          await _openScannerFromPayload(
+            rawPayload: payload,
+            navigator: navigator,
+          );
+        } catch (error) {
+          debugPrint(
+            '❌ Could not process queued scanner route: $error',
+          );
+        } finally {
+          if (scannerKey != null) {
+            _queuedScannerKeys.remove(scannerKey);
+          }
+        }
+      }
+    } finally {
+      _isDrainingScannerQueue = false;
+
+      if (_pendingScannerPayloads.isNotEmpty) {
+        unawaited(_drainScannerQueue());
+      }
+    }
+  }
+
+  // ══════════════════════════════════════════════════════════════
+  // SCHEDULE A DOSE  (✅ patientId added here)
   // ══════════════════════════════════════════════════════════════
 
   Future<void> scheduleForDose({
+    required String patientId, // ✅ FIX
     required String scheduleId,
     required String medicationId,
     required String medicationName,
@@ -184,18 +351,15 @@ class LocalNotificationService {
     }
 
     final now = DateTime.now();
-
     if (!scheduledFor.isAfter(now)) {
       debugPrint(
-        'ℹ️ Skipping dose notification because the time '
-            'has already passed: $scheduledFor',
+        'ℹ️ Skipping dose notification because '
+            'the time has already passed: $scheduledFor',
       );
       return;
     }
 
-    final priorTime = scheduledFor.subtract(
-      _priorDuration,
-    );
+    final priorTime = scheduledFor.subtract(_priorDuration);
 
     final priorNotificationId = _generateId(
       scheduleId,
@@ -222,11 +386,11 @@ class LocalNotificationService {
     );
 
     final basePayload = <String, dynamic>{
+      'patientId': patientId, // ✅ FIX: include patientId
       'scheduleId': scheduleId,
       'medicationId': medicationId,
       'scheduledFor': scheduledFor.toIso8601String(),
-      'scheduledForMillis':
-      scheduledFor.millisecondsSinceEpoch,
+      'scheduledForMillis': scheduledFor.millisecondsSinceEpoch,
       'medicationName': medicationName,
       'dosageDisplay': dosageDisplay,
       'pillImageUrl': pillImageUrl ?? '',
@@ -244,66 +408,35 @@ class LocalNotificationService {
       'alertType': 'medication_due',
     });
 
-    // Store the due payload so scanner actions remain available after
-    // process recreation and offline use.
+    // Cache due payload so it survives reboot/offline for native restore.
     await _cachePayload(
       scheduleId: scheduleId,
       scheduledFor: scheduledFor,
       payload: duePayload,
     );
 
-    // ──────────────────────────────────────────────────────────
-    // 1. TEN-MINUTE PRIOR REMINDER
-    //
-    // Native flow:
-    // - TTS reads three times
-    // - five vibration pulses
-    // - prior_reminder.mp3 plays once
-    // - scanner does not open
-    // ──────────────────────────────────────────────────────────
-
+    // 1) Prior reminder
     if (priorTime.isAfter(now)) {
       await _scheduleVisualNotification(
         id: priorNotificationId,
         title: '⏰ Upcoming: $medicationName',
-        body:
-        'Get ready — $dosageDisplay is due in 10 minutes',
+        body: 'Get ready — $dosageDisplay is due in 10 minutes',
         time: priorTime,
         payload: priorPayload,
         isUrgent: false,
         showDoseActions: false,
       );
 
-      await MedicationTtsService.instance
-          .schedulePriorReminder(
+      await MedicationTtsService.instance.schedulePriorReminder(
         alarmId: priorNativeAlarmId,
         startAt: priorTime,
         medicationName: medicationName,
         dosageDisplay: dosageDisplay,
         minutesBefore: 10,
       );
-
-      debugPrint(
-        '⏰ Prior reminder scheduled for $priorTime '
-            '(native ID: $priorNativeAlarmId)',
-      );
-    } else {
-      debugPrint(
-        'ℹ️ Prior reminder skipped because $priorTime '
-            'has already passed',
-      );
     }
 
-    // ──────────────────────────────────────────────────────────
-    // 2. EXACT DUE-TIME ALERT
-    //
-    // Native flow:
-    // - TTS reads three times
-    // - continuous vibration
-    // - alarm.mp3 loops
-    // - scanner/confirmation screen auto-opens
-    // ──────────────────────────────────────────────────────────
-
+    // 2) Due exact
     await _scheduleVisualNotification(
       id: dueNotificationId,
       title: '💊 Time to Take Medicine',
@@ -319,24 +452,12 @@ class LocalNotificationService {
       startAt: scheduledFor,
       message:
       'It is time to take $medicationName. '
-          'Dosage: $dosageDisplay. '
-          'Please confirm your medicine now.',
+          'Dosage: $dosageDisplay. Please confirm your medicine now.',
       payload: duePayload,
     );
 
-    debugPrint(
-      '🚨 Due alert scheduled for $scheduledFor '
-          '(native ID: $dueNativeAlarmId)',
-    );
-
-    // Retained only for API compatibility. The new audio flow does not
-    // require separate escalation alarms because alarm.mp3 continues
-    // until the reminder is stopped.
-    if (escalationStep1Mins < 0 ||
-        escalationStep2Mins < 0) {
-      debugPrint(
-        '⚠️ Invalid escalation values were supplied',
-      );
+    if (escalationStep1Mins < 0 || escalationStep2Mins < 0) {
+      debugPrint('⚠️ Invalid escalation values were supplied');
     }
   }
 
@@ -354,57 +475,32 @@ class LocalNotificationService {
     required bool showDoseActions,
   }) async {
     final now = DateTime.now();
-
-    if (!time.isAfter(now)) {
-      debugPrint(
-        'ℹ️ Visual notification #$id skipped because '
-            '$time is not in the future',
-      );
-      return;
-    }
+    if (!time.isAfter(now)) return;
 
     final notificationDetails = NotificationDetails(
       android: AndroidNotificationDetails(
-        isUrgent
-            ? _urgentChannelId
-            : _reminderChannelId,
-        isUrgent
-            ? 'Medication Due Alerts'
-            : 'Upcoming Medication Reminders',
+        isUrgent ? _urgentChannelId : _reminderChannelId,
+        isUrgent ? 'Medication Due Alerts' : 'Upcoming Medication Reminders',
         channelDescription: isUrgent
             ? 'Visual notification when a medication dose is due'
             : 'Visual notification ten minutes before a dose',
-        importance: isUrgent
-            ? Importance.max
-            : Importance.high,
-        priority: isUrgent
-            ? Priority.max
-            : Priority.high,
-
-        // Audio/vibration are provided by native TtsSpeakService.
+        importance: isUrgent ? Importance.max : Importance.high,
+        priority: isUrgent ? Priority.max : Priority.high,
         playSound: false,
         enableVibration: false,
         vibrationPattern: _noVibration,
-
-        category: isUrgent
-            ? AndroidNotificationCategory.alarm
-            : AndroidNotificationCategory.reminder,
-
+        category:
+        isUrgent ? AndroidNotificationCategory.alarm : AndroidNotificationCategory.reminder,
         enableLights: true,
         ledColor: const Color(0xFF00BFA5),
         ledOnMs: 500,
         ledOffMs: 500,
-
-        ticker: isUrgent
-            ? 'Medication due'
-            : 'Upcoming medication',
-
+        ticker: isUrgent ? 'Medication due' : 'Upcoming medication',
         styleInformation: BigTextStyleInformation(
           '$title\n$body',
           htmlFormatBigText: false,
           contentTitle: title,
         ),
-
         actions: showDoseActions
             ? const <AndroidNotificationAction>[
           AndroidNotificationAction(
@@ -421,17 +517,13 @@ class LocalNotificationService {
           ),
         ]
             : const <AndroidNotificationAction>[],
-
-        // Native TtsSpeakService handles automatic foreground opening.
-        // Keeping this false avoids duplicate scanner routes.
         fullScreenIntent: false,
       ),
       iOS: const DarwinNotificationDetails(
         presentAlert: true,
         presentSound: false,
         presentBadge: true,
-        interruptionLevel:
-        InterruptionLevel.timeSensitive,
+        interruptionLevel: InterruptionLevel.timeSensitive,
       ),
     );
 
@@ -440,40 +532,22 @@ class LocalNotificationService {
         id: id,
         title: title,
         body: body,
-        scheduledDate: tz.TZDateTime.from(
-          time,
-          tz.local,
-        ),
+        scheduledDate: tz.TZDateTime.from(time, tz.local),
         notificationDetails: notificationDetails,
-        androidScheduleMode:
-        AndroidScheduleMode.exactAllowWhileIdle,
+        androidScheduleMode: AndroidScheduleMode.exactAllowWhileIdle,
         payload: payload,
       );
-
-      debugPrint(
-        '🔔 Visual notification #$id scheduled at $time',
-      );
-    } catch (error, stack) {
-      debugPrint(
-        '⚠️ Visual notification #$id failed: $error',
-      );
-      debugPrint('$stack');
-
-      // Do not rethrow. The native alarm remains the critical alert path.
+    } catch (_) {
+      // Best-effort; native AlarmManager is still the critical path.
     }
   }
 
   // ══════════════════════════════════════════════════════════════
-  // PAYLOAD CACHE
+  // PAYLOAD CACHE HELPERS
   // ══════════════════════════════════════════════════════════════
 
-  String _cacheKey(
-      String scheduleId,
-      DateTime scheduledFor,
-      ) {
-    return '$_payloadPreferencePrefix'
-        '${scheduleId}_'
-        '${scheduledFor.millisecondsSinceEpoch}';
+  String _cacheKey(String scheduleId, DateTime scheduledFor) {
+    return '$_payloadPreferencePrefix${scheduleId}_${scheduledFor.millisecondsSinceEpoch}';
   }
 
   Future<void> _cachePayload({
@@ -482,18 +556,12 @@ class LocalNotificationService {
     required String payload,
   }) async {
     try {
-      final preferences =
-      await SharedPreferences.getInstance();
-
+      final preferences = await SharedPreferences.getInstance();
       await preferences.setString(
         _cacheKey(scheduleId, scheduledFor),
         payload,
       );
-    } catch (error) {
-      debugPrint(
-        '⚠️ Could not cache dose payload: $error',
-      );
-    }
+    } catch (_) {}
   }
 
   Future<void> _removeCachedPayload({
@@ -501,30 +569,29 @@ class LocalNotificationService {
     required DateTime scheduledFor,
   }) async {
     try {
-      final preferences =
-      await SharedPreferences.getInstance();
-
-      await preferences.remove(
-        _cacheKey(scheduleId, scheduledFor),
-      );
+      final preferences = await SharedPreferences.getInstance();
+      await preferences.remove(_cacheKey(scheduleId, scheduledFor));
     } catch (_) {}
   }
 
-  Future<void> _removeSchedulePayloads(
-      String scheduleId,
-      ) async {
+  Future<void> _removeSchedulePayloads(String scheduleId) async {
     try {
-      final preferences =
-      await SharedPreferences.getInstance();
+      final preferences = await SharedPreferences.getInstance();
+      final prefix = '$_payloadPreferencePrefix${scheduleId}_';
+      final keys =
+      preferences.getKeys().where((k) => k.startsWith(prefix)).toList();
+      for (final key in keys) {
+        await preferences.remove(key);
+      }
+    } catch (_) {}
+  }
 
-      final prefix =
-          '$_payloadPreferencePrefix${scheduleId}_';
-
-      final keys = preferences
-          .getKeys()
-          .where((key) => key.startsWith(prefix))
-          .toList();
-
+  Future<void> _removeAllCachedPayloads() async {
+    try {
+      final preferences = await SharedPreferences.getInstance();
+      final keys = preferences.getKeys().where(
+            (k) => k.startsWith(_payloadPreferencePrefix),
+      );
       for (final key in keys) {
         await preferences.remove(key);
       }
@@ -532,7 +599,7 @@ class LocalNotificationService {
   }
 
   // ══════════════════════════════════════════════════════════════
-  // CANCEL A SPECIFIC DOSE
+  // CANCEL DOSE / SCHEDULE / ALL
   // ══════════════════════════════════════════════════════════════
 
   Future<void> cancelDose({
@@ -540,194 +607,98 @@ class LocalNotificationService {
     required DateTime scheduledFor,
   }) async {
     final notificationIds = <int>[
-      _generateId(
-        scheduleId,
-        scheduledFor,
-        _dueNotificationStep,
-      ),
-      _generateId(
-        scheduleId,
-        scheduledFor,
-        _legacyEscalationStep1,
-      ),
-      _generateId(
-        scheduleId,
-        scheduledFor,
-        _legacyEscalationStep2,
-      ),
-      _generateId(
-        scheduleId,
-        scheduledFor,
-        _priorNotificationStep,
-      ),
+      _generateId(scheduleId, scheduledFor, _dueNotificationStep),
+      _generateId(scheduleId, scheduledFor, _legacyEscalationStep1),
+      _generateId(scheduleId, scheduledFor, _legacyEscalationStep2),
+      _generateId(scheduleId, scheduledFor, _priorNotificationStep),
     ];
 
     for (final id in notificationIds) {
       try {
         await _plugin.cancel(id: id);
-      } catch (error) {
-        debugPrint(
-          '⚠️ Could not cancel notification #$id: $error',
-        );
-      }
+      } catch (_) {}
     }
 
-    final priorNativeAlarmId = _generateId(
-      scheduleId,
-      scheduledFor,
-      _priorNativeAlarmStep,
-    );
-
-    final dueNativeAlarmId = _generateId(
-      scheduleId,
-      scheduledFor,
-      _dueNativeAlarmStep,
-    );
+    final priorNativeAlarmId =
+    _generateId(scheduleId, scheduledFor, _priorNativeAlarmStep);
+    final dueNativeAlarmId =
+    _generateId(scheduleId, scheduledFor, _dueNativeAlarmStep);
 
     await MedicationTtsService.instance
         .cancelPriorReminder(priorNativeAlarmId);
+    await MedicationTtsService.instance.cancelAutoOpen(dueNativeAlarmId);
 
-    await MedicationTtsService.instance
-        .cancelAutoOpen(dueNativeAlarmId);
-
-    // Stop any alert currently playing for this dose.
     await MedicationTtsService.instance.stop();
-
     await _removeCachedPayload(
       scheduleId: scheduleId,
       scheduledFor: scheduledFor,
     );
-
-    debugPrint(
-      '🗑️ Cancelled all alerts for dose '
-          '$scheduleId at $scheduledFor',
-    );
   }
 
-  // ══════════════════════════════════════════════════════════════
-  // CANCEL ALL ALERTS FOR A SCHEDULE
-  // ══════════════════════════════════════════════════════════════
-
-  Future<void> cancelSchedule(String scheduleId) async {
-    final pending =
-    await _plugin.pendingNotificationRequests();
+  Future<void> cancelSchedule(
+      String scheduleId,
+      ) async {
+    final pending = await _plugin.pendingNotificationRequests();
 
     final nativeAlarmIds = <int>{};
 
     for (final notification in pending) {
       final rawPayload = notification.payload;
-
-      if (rawPayload == null ||
-          !rawPayload.contains(scheduleId)) {
-        continue;
-      }
+      if (rawPayload == null) continue;
 
       try {
-        final data = jsonDecode(rawPayload)
-        as Map<String, dynamic>;
+        final decoded = jsonDecode(rawPayload);
+        if (decoded is! Map<String, dynamic>) continue;
 
-        final rawMillis =
-        data['scheduledForMillis'];
+        final payloadScheduleId =
+        decoded['scheduleId']?.toString();
+        if (payloadScheduleId != scheduleId) continue;
 
-        final scheduledFor = rawMillis is num
-            ? DateTime.fromMillisecondsSinceEpoch(
-          rawMillis.toInt(),
-        )
-            : DateTime.parse(
-          data['scheduledFor'] as String,
-        );
+        final scheduledFor = _scheduledTimeFromPayload(decoded);
 
         nativeAlarmIds.add(
-          _generateId(
-            scheduleId,
-            scheduledFor,
-            _priorNativeAlarmStep,
-          ),
+          _generateId(scheduleId, scheduledFor, _priorNativeAlarmStep),
         );
-
         nativeAlarmIds.add(
-          _generateId(
-            scheduleId,
-            scheduledFor,
-            _dueNativeAlarmStep,
-          ),
+          _generateId(scheduleId, scheduledFor, _dueNativeAlarmStep),
         );
-      } catch (error) {
-        debugPrint(
-          '⚠️ Could not parse notification payload '
-              'while cancelling schedule: $error',
-        );
-      }
 
-      try {
-        await _plugin.cancel(id: notification.id);
+        try {
+          await _plugin.cancel(id: notification.id);
+        } catch (_) {}
       } catch (_) {}
     }
 
     for (final alarmId in nativeAlarmIds) {
-      await MedicationTtsService.instance
-          .cancelAutoOpen(alarmId);
+      await MedicationTtsService.instance.cancelAutoOpen(alarmId);
     }
 
     await _removeSchedulePayloads(scheduleId);
-
-    debugPrint(
-      '🗑️ Cancelled schedule alerts: $scheduleId',
-    );
   }
 
-  // ══════════════════════════════════════════════════════════════
-  // CANCEL EVERYTHING
-  // ══════════════════════════════════════════════════════════════
-
   Future<void> cancelAll() async {
-    final pending =
-    await _plugin.pendingNotificationRequests();
+    final pending = await _plugin.pendingNotificationRequests();
 
     final nativeAlarmIds = <int>{};
 
     for (final notification in pending) {
       final rawPayload = notification.payload;
-
       if (rawPayload == null) continue;
 
       try {
-        final data = jsonDecode(rawPayload)
-        as Map<String, dynamic>;
+        final decoded = jsonDecode(rawPayload);
+        if (decoded is! Map<String, dynamic>) continue;
 
-        final scheduleId =
-        data['scheduleId']?.toString();
+        final scheduleId = decoded['scheduleId']?.toString();
+        if (scheduleId == null || scheduleId.trim().isEmpty) continue;
 
-        if (scheduleId == null ||
-            scheduleId.isEmpty) {
-          continue;
-        }
-
-        final rawMillis =
-        data['scheduledForMillis'];
-
-        final scheduledFor = rawMillis is num
-            ? DateTime.fromMillisecondsSinceEpoch(
-          rawMillis.toInt(),
-        )
-            : DateTime.parse(
-          data['scheduledFor'] as String,
-        );
+        final scheduledFor = _scheduledTimeFromPayload(decoded);
 
         nativeAlarmIds.add(
-          _generateId(
-            scheduleId,
-            scheduledFor,
-            _priorNativeAlarmStep,
-          ),
+          _generateId(scheduleId, scheduledFor, _priorNativeAlarmStep),
         );
-
         nativeAlarmIds.add(
-          _generateId(
-            scheduleId,
-            scheduledFor,
-            _dueNativeAlarmStep,
-          ),
+          _generateId(scheduleId, scheduledFor, _dueNativeAlarmStep),
         );
       } catch (_) {}
     }
@@ -735,13 +706,26 @@ class LocalNotificationService {
     await _plugin.cancelAll();
 
     for (final alarmId in nativeAlarmIds) {
-      await MedicationTtsService.instance
-          .cancelAutoOpen(alarmId);
+      await MedicationTtsService.instance.cancelAutoOpen(alarmId);
     }
 
     await MedicationTtsService.instance.stop();
+    await _removeAllCachedPayloads();
 
-    debugPrint('🗑️ All medication alerts cancelled');
+    _pendingScannerPayloads.clear();
+    _queuedScannerKeys.clear();
+  }
+
+  DateTime _scheduledTimeFromPayload(Map<String, dynamic> data) {
+    final rawMillis = data['scheduledForMillis'];
+    if (rawMillis is num) {
+      return DateTime.fromMillisecondsSinceEpoch(rawMillis.toInt());
+    }
+    final rawScheduledFor = data['scheduledFor']?.toString();
+    if (rawScheduledFor == null || rawScheduledFor.trim().isEmpty) {
+      throw const FormatException('Missing scheduled medication time');
+    }
+    return DateTime.parse(rawScheduledFor);
   }
 
   // ══════════════════════════════════════════════════════════════
@@ -753,9 +737,7 @@ class LocalNotificationService {
       DateTime time,
       int step,
       ) {
-    return '${scheduleId}_'
-        '${time.millisecondsSinceEpoch}_'
-        '$step'
+    return '${scheduleId}_${time.millisecondsSinceEpoch}_$step'
         .hashCode
         .abs() %
         2147483647;
@@ -766,87 +748,87 @@ class LocalNotificationService {
 // OPEN REMINDER SCREEN FROM PAYLOAD
 // ══════════════════════════════════════════════════════════════
 
-Future<void> _openScannerFromPayload(
-    String rawPayload,
-    ) async {
+Future<void> _openScannerFromPayload({
+  required String rawPayload,
+  required NavigatorState navigator,
+}) async {
   try {
-    final data = jsonDecode(rawPayload)
-    as Map<String, dynamic>;
-
-    final alertType =
-        data['alertType']?.toString() ?? 'medication_due';
-
-    // A ten-minute prior notification must not open the due screen.
-    if (alertType == 'prior_reminder') {
-      debugPrint(
-        'ℹ️ Prior reminder tapped; scanner will not open',
+    final decoded = jsonDecode(rawPayload);
+    if (decoded is! Map<String, dynamic>) {
+      throw const FormatException(
+        'Scanner payload must be a JSON object',
       );
+    }
+
+    final alertType = decoded['alertType']?.toString() ??
+        'medication_due';
+
+    if (alertType == 'prior_reminder') {
       return;
     }
 
-    final rawDosage =
-        data['dosageDisplay']?.toString() ?? '';
+    final scheduleId = decoded['scheduleId']?.toString();
+    final medicationId = decoded['medicationId']?.toString();
+    final patientId = decoded['patientId']?.toString(); // ✅ FIX
+    final rawScheduledFor = decoded['scheduledFor']?.toString();
 
-    final dosageParts = rawDosage
-        .trim()
-        .split(RegExp(r'\s+'));
+    if (scheduleId == null ||
+        scheduleId.trim().isEmpty ||
+        medicationId == null ||
+        medicationId.trim().isEmpty ||
+        rawScheduledFor == null ||
+        rawScheduledFor.trim().isEmpty) {
+      throw const FormatException(
+        'Scanner payload is missing dose identifiers',
+      );
+    }
 
-    final double dosageAmount = dosageParts.isNotEmpty
+    final rawDosage = decoded['dosageDisplay']?.toString().trim() ?? '';
+    final dosageParts =
+    rawDosage.isEmpty ? <String>[] : rawDosage.split(RegExp(r'\s+'));
+
+    final dosageAmount = dosageParts.isNotEmpty
         ? (double.tryParse(dosageParts.first) ?? 1.0)
         : 1.0;
 
     final dosageUnit = dosageParts.length > 1
         ? dosageParts.sublist(1).join(' ')
-        : 'dose';
+        : (rawDosage.isNotEmpty ? rawDosage : 'dose');
 
-    final imageUrl =
-    data['pillImageUrl']?.toString();
+    final rawImageUrl = decoded['pillImageUrl']?.toString()?.trim();
+    final medicationName = decoded['medicationName']
+        ?.toString()
+        .trim()
+        .takeIfNotEmpty ??
+        'Medication';
+
+    final genericName = decoded['genericName']
+        ?.toString()
+        .trim()
+        .takeIfNotEmpty ??
+        medicationName;
 
     final dose = TodayDose(
-      scheduleId:
-      data['scheduleId'] as String,
-      medicationId:
-      data['medicationId'] as String,
-      medicationName:
-      data['medicationName']?.toString() ??
-          'Medication',
-      genericName:
-      data['medicationName']?.toString() ??
-          'Medication',
+      patientId: patientId, // ✅ FIX: pass patientId into TodayDose
+      scheduleId: scheduleId,
+      medicationId: medicationId,
+      medicationName: medicationName,
+      genericName: genericName,
       dosageAmount: dosageAmount,
       dosageUnit: dosageUnit,
-      scheduledTime: DateTime.parse(
-        data['scheduledFor'] as String,
-      ),
-      pillImageUrl: imageUrl != null &&
-          imageUrl.trim().isNotEmpty
-          ? imageUrl
-          : null,
+      scheduledTime: DateTime.parse(rawScheduledFor),
+      pillImageUrl:
+      rawImageUrl != null && rawImageUrl.isNotEmpty ? rawImageUrl : null,
     );
 
-    final navigator = navigatorKey.currentState;
-
-    if (navigator == null) {
-      debugPrint(
-        '⚠️ Navigator is not ready to open reminder screen',
-      );
-      return;
-    }
-
-    await navigator.push(
+    await navigator.push<bool>(
       MaterialPageRoute<bool>(
         fullscreenDialog: true,
-        builder: (_) =>
-            MedicationReminderScannerScreen(
-              dose: dose,
-            ),
+        builder: (_) => MedicationReminderScannerScreen(dose: dose),
       ),
     );
   } catch (error, stack) {
-    debugPrint(
-      '❌ Failed to open reminder screen from payload: '
-          '$error',
-    );
+    debugPrint('❌ Failed to open reminder screen from payload: $error');
     debugPrint('$stack');
   }
 }
@@ -859,47 +841,68 @@ Future<void> _openScannerFromPayload(
 Future<void> _onNotificationTapped(
     NotificationResponse response,
     ) async {
+  await _handleNotificationResponse(response);
+}
+
+Future<void> _handleNotificationResponse(
+    NotificationResponse response,
+    ) async {
   final rawPayload = response.payload;
 
-  if (rawPayload == null ||
-      rawPayload.trim().isEmpty) {
-    return;
-  }
+  if (rawPayload == null || rawPayload.trim().isEmpty) return;
 
   try {
-    final data = jsonDecode(rawPayload)
-    as Map<String, dynamic>;
+    final decoded = jsonDecode(rawPayload);
+    if (decoded is! Map<String, dynamic>) {
+      throw const FormatException(
+        'Notification payload must be a JSON object',
+      );
+    }
 
     final alertType =
-        data['alertType']?.toString() ?? 'medication_due';
+        decoded['alertType']?.toString() ?? 'medication_due';
 
-    // Prior notifications are informational only.
     if (alertType == 'prior_reminder') {
-      debugPrint(
-        'ℹ️ Prior reminder notification opened',
-      );
       return;
     }
 
     if (response.actionId == 'MARK_TAKEN') {
+      final scheduleId = decoded['scheduleId']?.toString();
+      final medicationId = decoded['medicationId']?.toString();
+      final scheduledForStr = decoded['scheduledFor']?.toString();
+      final patientId = decoded['patientId']?.toString(); // ✅ FIX
+
+      if (scheduleId == null ||
+          scheduleId.trim().isEmpty ||
+          medicationId == null ||
+          medicationId.trim().isEmpty ||
+          scheduledForStr == null ||
+          scheduledForStr.trim().isEmpty) {
+        throw const FormatException('Mark-as-taken payload is incomplete');
+      }
+
       await DoseLogService.instance.markAsTaken(
-        scheduleId:
-        data['scheduleId'] as String,
-        medicationId:
-        data['medicationId'] as String,
-        scheduledFor: DateTime.parse(
-          data['scheduledFor'] as String,
-        ),
+        scheduleId: scheduleId,
+        medicationId: medicationId,
+        scheduledFor: DateTime.parse(scheduledForStr),
+        patientId: patientId, // ✅ FIX
       );
+
+      await MedicationTtsService.instance.stop();
       return;
     }
 
-    // Notification body or Confirm Medicine action.
-    await _openScannerFromPayload(rawPayload);
+    // OPEN_SCANNER action / body tap: queue + native handler will open
+    LocalNotificationService.instance._queueScannerPayload(rawPayload);
   } catch (error, stack) {
-    debugPrint(
-      '❌ Notification response failed: $error',
-    );
+    debugPrint('❌ Notification response failed: $error');
     debugPrint('$stack');
+  }
+}
+
+// Small helper for safely selecting non-empty payload strings.
+extension _NonEmptyStringExtension on String {
+  String? get takeIfNotEmpty {
+    return isEmpty ? null : this;
   }
 }

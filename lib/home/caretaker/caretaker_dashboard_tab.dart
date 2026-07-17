@@ -48,7 +48,6 @@ class _CaretakerDashboardTabState extends State<CaretakerDashboardTab> {
       MaterialPageRoute(builder: (_) => const PendingInvitesScreen()),
     );
   }
-
   @override
   Widget build(BuildContext context) {
     if (_isLoading) {
@@ -61,59 +60,6 @@ class _CaretakerDashboardTabState extends State<CaretakerDashboardTab> {
       child: ListView(
         padding: const EdgeInsets.all(16),
         children: [
-          // ── Greeting Card ──
-          Container(
-            padding: const EdgeInsets.all(20),
-            decoration: BoxDecoration(
-              gradient: LinearGradient(
-                colors: [AppColors.secondary, AppColors.secondaryLight],
-                begin: Alignment.topLeft,
-                end: Alignment.bottomRight,
-              ),
-              borderRadius: BorderRadius.circular(20),
-            ),
-            child: Row(
-              children: [
-                Expanded(
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Text(
-                        _greeting,
-                        style: AppTextStyles.bodyMedium.copyWith(
-                          color: Colors.white70,
-                        ),
-                      ),
-                      const SizedBox(height: 4),
-                      Text(
-                        _profile?.fullName ?? 'Caretaker',
-                        style: AppTextStyles.h1.copyWith(color: Colors.white),
-                      ),
-                      const SizedBox(height: 8),
-                      Text(
-                        'Watching over your loved ones',
-                        style: AppTextStyles.bodySmall.copyWith(
-                          color: Colors.white60,
-                        ),
-                      ),
-                    ],
-                  ),
-                ),
-                Container(
-                  padding: const EdgeInsets.all(12),
-                  decoration: BoxDecoration(
-                    color: AppColors.primary,
-                    shape: BoxShape.circle,
-                  ),
-                  child: const Icon(
-                    Icons.shield_rounded,
-                    color: AppColors.secondary,
-                    size: 24,
-                  ),
-                ),
-              ],
-            ),
-          ),
 
           const SizedBox(height: 24),
 

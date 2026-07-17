@@ -144,6 +144,7 @@ class _AddMedicationScreenState extends State<AddMedicationScreen> {
     }
   }
 
+  /// Cached save - validates, navigates immediately, saves in background
   Future<void> _saveMedication() async {
     setState(() => _submitted = true);
 
@@ -166,75 +167,131 @@ class _AddMedicationScreenState extends State<AddMedicationScreen> {
       return;
     }
 
+    // Prevent double-taps
+    if (_isSaving) return;
     setState(() => _isSaving = true);
 
+    // Validate numeric fields
+    final dosageText = _dosageAmountCtrl.text.trim();
+    final dosageAmount = double.tryParse(dosageText);
+
+    if (dosageAmount == null || dosageAmount <= 0) {
+      AppSnackbar.error(context, 'Please enter a valid dosage amount');
+      setState(() => _isSaving = false);
+      return;
+    }
+
+    int? quantity;
+    if (_quantityCtrl.text.trim().isNotEmpty) {
+      quantity = int.tryParse(_quantityCtrl.text.trim());
+      if (quantity == null || quantity < 0) {
+        AppSnackbar.error(context, 'Please enter a valid quantity');
+        setState(() => _isSaving = false);
+        return;
+      }
+    }
+
+    // Capture form data for background save
+    final formData = _MedicationFormData(
+      genericName: _genericNameCtrl.text.trim(),
+      brandName: _brandNameCtrl.text.trim().isEmpty ? null : _brandNameCtrl.text.trim(),
+      dosageAmount: dosageAmount,
+      dosageUnit: _dosageUnit,
+      medicationType: _medicationType,
+      currentQuantity: quantity,
+      pillColor: _pillColor!,
+      pillShape: _pillShape!,
+      notes: _notesCtrl.text.trim().isEmpty ? null : _notesCtrl.text.trim(),
+      imageBytes: _selectedImageBytes!,
+      imageName: _selectedImage!.name,
+    );
+
+    _anySaved = true;
+
+    if (!mounted) return;
+
+    // For scheduled medications, navigate to schedule screen first
+    if (_medicationType == 'scheduled') {
+      AppSnackbar.success(context, 'Medication saved. Now set up schedule.');
+
+      // Navigate immediately, save in background after schedule is set
+      final result = await Navigator.pushReplacement(
+        context,
+        MaterialPageRoute(
+          builder: (_) => AddScheduleScreen(
+            medicationId: 'pending',
+            medicationName: formData.genericName,
+          ),
+        ),
+      );
+
+      if (mounted && result == true) {
+        Navigator.pop(context, true);
+      }
+
+      // Save medication in background after navigation
+      _saveMedicationInBackground(formData);
+    } else {
+      // For non-scheduled, navigate back immediately
+      AppSnackbar.success(context, 'Medication saved!');
+      Navigator.pop(context, true);
+
+      // Save in background
+      _saveMedicationInBackground(formData);
+    }
+  }
+
+  /// Performs the actual save operation in the background
+  Future<void> _saveMedicationInBackground(_MedicationFormData data) async {
     try {
-      final dosageText = _dosageAmountCtrl.text.trim();
-      final dosageAmount = double.tryParse(dosageText);
-
-      if (dosageAmount == null || dosageAmount <= 0) {
-        throw Exception('Please enter a valid dosage amount');
-      }
-
-      int? quantity;
-      if (_quantityCtrl.text.trim().isNotEmpty) {
-        quantity = int.tryParse(_quantityCtrl.text.trim());
-        if (quantity == null || quantity < 0) {
-          throw Exception('Please enter a valid quantity');
-        }
-      }
-
       // 1. Upload image to Supabase Storage
       final imageUrl = await MedicationService.instance.uploadMedicationImage(
-        bytes: _selectedImageBytes!,
-        fileName: _selectedImage!.name,
+        bytes: data.imageBytes,
+        fileName: data.imageName,
       );
 
       // 2. Save medication with pill_image_url
-      final medication = await MedicationService.instance.addMedication(
-        genericName: _genericNameCtrl.text.trim(),
-        brandName: _brandNameCtrl.text.trim().isEmpty
-            ? null
-            : _brandNameCtrl.text.trim(),
-        dosageAmount: dosageAmount,
-        dosageUnit: _dosageUnit,
-        medicationType: _medicationType,
-        currentQuantity: quantity,
-        pillColor: _pillColor,
-        pillShape: _pillShape,
+      await MedicationService.instance.addMedication(
+        genericName: data.genericName,
+        brandName: data.brandName,
+        dosageAmount: data.dosageAmount,
+        dosageUnit: data.dosageUnit,
+        medicationType: data.medicationType,
+        currentQuantity: data.currentQuantity,
+        pillColor: data.pillColor,
+        pillShape: data.pillShape,
         pillImageUrl: imageUrl,
-        notes: _notesCtrl.text.trim().isEmpty ? null : _notesCtrl.text.trim(),
+        notes: data.notes,
       );
 
-      _anySaved = true;
-
-      if (!mounted) return;
-
-      if (_medicationType == 'scheduled') {
-        AppSnackbar.success(context, 'Medication saved. Now set up schedule.');
-
-        final result = await Navigator.pushReplacement(
-          context,
-          MaterialPageRoute(
-            builder: (_) => AddScheduleScreen(
-              medicationId: medication.id,
-              medicationName: medication.displayName,
-            ),
-          ),
-        );
-
-        if (mounted && result == true) {
-          Navigator.pop(context, true);
-        }
-      } else {
-        AppSnackbar.success(context, 'Medication saved!');
-        Navigator.pop(context, true);
-      }
+      debugPrint('Medication saved successfully in background');
     } catch (e) {
-      if (!mounted) return;
+      debugPrint('Background save error: $e');
+      _showBackgroundError('Failed to save medication. Please try again.');
+    }
+  }
 
-      AppSnackbar.error(context, _friendlyError(e.toString()));
-      setState(() => _isSaving = false);
+  void _showBackgroundError(String message) {
+    if (mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Row(
+            children: [
+              const Icon(Icons.error_outline, color: Colors.white),
+              const SizedBox(width: 12),
+              Expanded(child: Text(message)),
+            ],
+          ),
+          backgroundColor: Colors.red.shade600,
+          behavior: SnackBarBehavior.floating,
+          duration: const Duration(seconds: 4),
+          action: SnackBarAction(
+            label: 'Retry',
+            textColor: Colors.white,
+            onPressed: _saveMedication,
+          ),
+        ),
+      );
     }
   }
 
@@ -285,7 +342,6 @@ class _AddMedicationScreenState extends State<AddMedicationScreen> {
             children: [
               // ═══════════════════════════════════════════════════
               // FIXED TOP IMAGE CARD
-              // This stays stacked at the top while the rest scrolls.
               // ═══════════════════════════════════════════════════
               Container(
                 color: AppColors.background,
@@ -613,6 +669,37 @@ class _AddMedicationScreenState extends State<AddMedicationScreen> {
 }
 
 // ══════════════════════════════════════════════════════════════
+// FORM DATA - Captures all form values for background save
+// ══════════════════════════════════════════════════════════════
+class _MedicationFormData {
+  final String genericName;
+  final String? brandName;
+  final double dosageAmount;
+  final String dosageUnit;
+  final String medicationType;
+  final int? currentQuantity;
+  final String pillColor;
+  final String pillShape;
+  final String? notes;
+  final Uint8List imageBytes;
+  final String imageName;
+
+  const _MedicationFormData({
+    required this.genericName,
+    this.brandName,
+    required this.dosageAmount,
+    required this.dosageUnit,
+    required this.medicationType,
+    this.currentQuantity,
+    required this.pillColor,
+    required this.pillShape,
+    this.notes,
+    required this.imageBytes,
+    required this.imageName,
+  });
+}
+
+// ══════════════════════════════════════════════════════════════
 // ADD IMAGE CARD
 // ══════════════════════════════════════════════════════════════
 class _AddImageCard extends StatelessWidget {
@@ -879,17 +966,13 @@ class _TypeCard extends StatelessWidget {
             Icon(
               icon,
               size: 24,
-              color: selected
-                  ? AppColors.secondary
-                  : AppColors.textSecondary,
+              color: selected ? AppColors.secondary : AppColors.textSecondary,
             ),
             const SizedBox(height: 8),
             Text(
               label,
               style: AppTextStyles.titleSmall.copyWith(
-                color: selected
-                    ? AppColors.secondary
-                    : AppColors.textPrimary,
+                color: selected ? AppColors.secondary : AppColors.textPrimary,
               ),
             ),
             const SizedBox(height: 2),

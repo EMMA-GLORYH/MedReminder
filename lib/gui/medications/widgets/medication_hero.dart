@@ -10,6 +10,8 @@ class MedicationHero extends StatelessWidget {
   final int scheduledCount;
   final TextEditingController searchController;
   final VoidCallback onClearSearch;
+  final VoidCallback? onRefresh;
+  final bool isRefreshing;
 
   const MedicationHero({
     super.key,
@@ -17,6 +19,8 @@ class MedicationHero extends StatelessWidget {
     required this.scheduledCount,
     required this.searchController,
     required this.onClearSearch,
+    this.onRefresh,
+    this.isRefreshing = false,
   });
 
   @override
@@ -44,7 +48,7 @@ class MedicationHero extends StatelessWidget {
                 crossAxisAlignment: CrossAxisAlignment.start,
                 mainAxisSize: MainAxisSize.min,
                 children: [
-                  // Stats row
+                  // Stats row with refresh button
                   Row(
                     children: [
                       _HeroChip(
@@ -56,6 +60,13 @@ class MedicationHero extends StatelessWidget {
                         icon: Icons.schedule_rounded,
                         label: '$scheduledCount scheduled',
                       ),
+                      const Spacer(),
+                      // Refresh button
+                      if (onRefresh != null)
+                        _RefreshButton(
+                          onRefresh: onRefresh!,
+                          isRefreshing: isRefreshing,
+                        ),
                     ],
                   ),
                   const SizedBox(height: 14),
@@ -76,6 +87,48 @@ class MedicationHero extends StatelessWidget {
               ),
             ),
           ],
+        ),
+      ),
+    );
+  }
+}
+
+class _RefreshButton extends StatelessWidget {
+  final VoidCallback onRefresh;
+  final bool isRefreshing;
+
+  const _RefreshButton({
+    required this.onRefresh,
+    required this.isRefreshing,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Tooltip(
+      message: 'Refresh list',
+      child: InkWell(
+        onTap: isRefreshing ? null : onRefresh,
+        borderRadius: BorderRadius.circular(20),
+        child: Container(
+          padding: const EdgeInsets.all(8),
+          decoration: BoxDecoration(
+            color: Colors.white.withValues(alpha: 0.15),
+            borderRadius: BorderRadius.circular(20),
+          ),
+          child: isRefreshing
+              ? SizedBox(
+            width: 18,
+            height: 18,
+            child: CircularProgressIndicator(
+              strokeWidth: 2,
+              valueColor: AlwaysStoppedAnimation<Color>(AppColors.primary),
+            ),
+          )
+              : Icon(
+            Icons.refresh_rounded,
+            size: 18,
+            color: AppColors.primary,
+          ),
         ),
       ),
     );

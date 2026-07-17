@@ -96,6 +96,19 @@ class _MedicationDetailScreenState extends State<MedicationDetailScreen> {
         builder: (_) => AddScheduleScreen(
           medicationId: _medication.id,
           medicationName: _medication.displayName,
+          onOptimisticDoses: (doses) {
+            // Medication detail doesn't show a schedule list,
+            // so optimistic doses aren't needed here.
+            debugPrint('Optimistic doses: ${doses.length}');
+          },
+          onSaveCompleted: () {
+            if (mounted) {
+              setState(() => _wasModified = true);
+            }
+          },
+          onSaveFailed: (error) {
+            debugPrint('Save failed: $error');
+          },
         ),
       ),
     );

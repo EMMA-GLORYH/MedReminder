@@ -1,3 +1,5 @@
+// android/app/src/main/kotlin/com/example/mar/MainActivity.kt
+
 package com.example.mar
 
 import android.app.AlarmManager
@@ -19,6 +21,11 @@ class MainActivity : FlutterActivity() {
 
         private const val SCANNER_ROUTE_CHANNEL =
             "medication_scanner_route"
+
+        // ✅ NEW: SOS Realtime channel name.
+        // Must match SosRealtimeNativeService._channel in Dart.
+        private const val SOS_REALTIME_CHANNEL =
+            "sos_realtime_background"
 
         private const val ACTION_OPEN_SCANNER =
             "com.example.mar.OPEN_SCANNER"
@@ -60,6 +67,9 @@ class MainActivity : FlutterActivity() {
 
         configureAlertChannel(flutterEngine)
         configureScannerRouteChannel(flutterEngine)
+
+        // ✅ NEW: SOS Realtime background WebSocket control.
+        configureSosRealtimeChannel(flutterEngine)
 
         /*
          * Do not immediately call Flutter for a cold-start intent.
@@ -168,12 +178,6 @@ class MainActivity : FlutterActivity() {
             flutterEngine.dartExecutor.binaryMessenger,
             SCANNER_ROUTE_CHANNEL
         ).also { channel ->
-            /*
-             * Flutter calls getInitialScannerPayload after it has:
-             * 1. registered its openScanner handler;
-             * 2. initialized the app;
-             * 3. created its root navigator.
-             */
             channel.setMethodCallHandler { call, result ->
                 when (call.method) {
                     "getInitialScannerPayload" -> {
@@ -199,6 +203,124 @@ class MainActivity : FlutterActivity() {
         }
     }
 
+    // ══════════════════════════════════════════════════════════════
+    // SOS REALTIME BACKGROUND CHANNEL ✅ NEW
+    //
+    // Flutter calls startSosRealtime to launch SosRealtimeService,
+    // which maintains a native OkHttp WebSocket to Supabase Realtime.
+    // When a new SOS INSERT arrives, SosRealtimeService fires
+    // TtsSpeakService directly — no Flutter needed.
+    // ══════════════════════════════════════════════════════════════
+
+    private fun configureSosRealtimeChannel(
+        flutterEngine: FlutterEngine
+    ) {
+        MethodChannel(
+            flutterEngine.dartExecutor.binaryMessenger,
+            SOS_REALTIME_CHANNEL
+        ).setMethodCallHandler { call, result ->
+            try {
+                when (call.method) {
+                    "startSosRealtime" -> {
+                        val caregiverId =
+                            call.argument<String>("caregiverId")
+                                ?.trim()
+                                .orEmpty()
+
+                        val supabaseUrl =
+                            call.argument<String>("supabaseUrl")
+                                ?.trim()
+                                .orEmpty()
+
+                        val supabaseAnonKey =
+                            call.argument<String>("supabaseAnonKey")
+                                ?.trim()
+                                .orEmpty()
+
+                        if (caregiverId.isBlank()) {
+                            result.error(
+                                "INVALID_ARGUMENT",
+                                "caregiverId is required",
+                                null
+                            )
+                            return@setMethodCallHandler
+                        }
+
+                        if (supabaseUrl.isBlank()) {
+                            result.error(
+                                "INVALID_ARGUMENT",
+                                "supabaseUrl is required",
+                                null
+                            )
+                            return@setMethodCallHandler
+                        }
+
+                        if (supabaseAnonKey.isBlank()) {
+                            result.error(
+                                "INVALID_ARGUMENT",
+                                "supabaseAnonKey is required",
+                                null
+                            )
+                            return@setMethodCallHandler
+                        }
+
+                        // ✅ Read the user's session JWT that Dart now sends.
+                        // Row Level Security needs this on the socket so the
+                        // caretaker only receives their own SOS alerts.
+                        val accessToken =
+                            call.argument<String>("accessToken")
+                                ?.trim()
+                                .orEmpty()
+
+                        SosRealtimeService.start(
+                            context = this,
+                            caregiverId = caregiverId,
+                            supabaseUrl = supabaseUrl,
+                            supabaseAnonKey = supabaseAnonKey,
+                            accessToken = accessToken   // ✅ 5th parameter
+                        )
+
+                        Log.d(
+                            LOG_TAG,
+                            "SOS Realtime service started for " +
+                                    "caregiver $caregiverId"
+                        )
+
+                        result.success(null)
+                    }
+
+                    "stopSosRealtime" -> {
+                        SosRealtimeService.stop(this)
+
+                        Log.d(
+                            LOG_TAG,
+                            "SOS Realtime service stopped"
+                        )
+
+                        result.success(null)
+                    }
+
+                    else -> {
+                        result.notImplemented()
+                    }
+                }
+            } catch (error: Exception) {
+                Log.e(
+                    LOG_TAG,
+                    "SOS Realtime channel error for ${call.method}",
+                    error
+                )
+
+                result.error(
+                    "SOS_REALTIME_ERROR",
+                    error.message
+                        ?: "SOS Realtime operation failed",
+                    null
+                )
+            }
+        }
+    }
+
     private fun extractScannerPayload(
         sourceIntent: Intent?
     ): String? {
@@ -212,11 +334,6 @@ class MainActivity : FlutterActivity() {
             ?.takeIf { it.isNotBlank() }
     }
 
-    /*
-     * Used for a warm start, where Flutter should already have registered
-     * its method handler. If delivery fails, keep the payload so Flutter
-     * can retrieve it using getInitialScannerPayload.
-     */
     private fun dispatchPendingScannerPayload() {
         val payload = pendingScannerPayload
             ?.takeIf { it.isNotBlank() }
@@ -250,8 +367,6 @@ class MainActivity : FlutterActivity() {
                         "Flutter rejected scanner payload: " +
                                 "$errorCode, $errorMessage"
                     )
-
-                    // Keep pendingScannerPayload for later retrieval.
                 }
 
                 override fun notImplemented() {
@@ -259,8 +374,6 @@ class MainActivity : FlutterActivity() {
                         LOG_TAG,
                         "Flutter scanner route handler is not ready"
                     )
-
-                    // Keep pendingScannerPayload for later retrieval.
                 }
             }
         )
@@ -373,10 +486,7 @@ class MainActivity : FlutterActivity() {
                 putExtra("loopSound", loopSound)
                 putExtra("launchScanner", launchScanner)
                 putExtra("vibrationMode", vibrationMode)
-                putExtra(
-                    "ttsRepeatCount",
-                    ttsRepeatCount
-                )
+                putExtra("ttsRepeatCount", ttsRepeatCount)
             }
 
         val pendingIntent =
@@ -533,29 +643,16 @@ class MainActivity : FlutterActivity() {
                 this,
                 TtsSpeakService::class.java
             ).apply {
-                action =
-                    TtsSpeakService.ACTION_START
+                action = TtsSpeakService.ACTION_START
 
                 putExtra("message", message)
                 putExtra("payload", payload)
                 putExtra("alertMode", alertMode)
-                putExtra(
-                    "soundResource",
-                    soundResource
-                )
+                putExtra("soundResource", soundResource)
                 putExtra("loopSound", loopSound)
-                putExtra(
-                    "launchScanner",
-                    launchScanner
-                )
-                putExtra(
-                    "vibrationMode",
-                    vibrationMode
-                )
-                putExtra(
-                    "ttsRepeatCount",
-                    ttsRepeatCount
-                )
+                putExtra("launchScanner", launchScanner)
+                putExtra("vibrationMode", vibrationMode)
+                putExtra("ttsRepeatCount", ttsRepeatCount)
             }
 
         Log.d(
@@ -616,17 +713,12 @@ class MainActivity : FlutterActivity() {
     }
 
     private fun stopTtsService() {
-        /*
-         * Sending ACTION_STOP guarantees that the service executes
-         * stopEverything(), including audio, vibration and flashlight.
-         */
         val stopIntent =
             Intent(
                 this,
                 TtsSpeakService::class.java
             ).apply {
-                action =
-                    TtsSpeakService.ACTION_STOP
+                action = TtsSpeakService.ACTION_STOP
             }
 
         try {

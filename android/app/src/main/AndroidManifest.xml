@@ -12,7 +12,7 @@
         android:name="android.hardware.camera.flash"
         android:required="false" />
 
-    <!-- Required for loading the medication image from pill_image_url. -->
+    <!-- Required for loading medication images and Supabase Realtime. -->
     <uses-permission android:name="android.permission.INTERNET" />
 
     <!-- Alarm and notification permissions. -->
@@ -25,7 +25,6 @@
 
     <!--
         Required by CameraManager.setTorchMode().
-
         CAMERA is a runtime permission. Declaring it here does not
         automatically grant it. The user must grant camera access at least
         once before the physical flashlight can be controlled.
@@ -38,11 +37,17 @@
     -->
     <uses-permission android:name="android.permission.USE_FULL_SCREEN_INTENT" />
 
-    <!-- Required by TtsSpeakService. -->
+    <!-- Required by TtsSpeakService (audio alarm). -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK" />
 
-    <!-- Existing application permissions. -->
+    <!--
+        Required by SosRealtimeService (background WebSocket / data sync).
+        Added for API 34+ foreground service type enforcement.
+    -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
+
+    <!-- Location permissions for SOS location reporting. -->
     <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
     <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
 
@@ -128,11 +133,29 @@
         <!--
             Foreground service responsible for TTS, alarm sound, vibration
             and best-effort physical flashlight flashing.
+            Used by both medication reminders and SOS alerts.
         -->
         <service
             android:name=".TtsSpeakService"
             android:exported="false"
             android:foregroundServiceType="mediaPlayback" />
+
+        <!--
+            Native background WebSocket service that keeps a Supabase
+            Realtime connection alive for the caretaker.
+
+            Fires TtsSpeakService directly when a patient SOS arrives,
+            bypassing Flutter entirely. This ensures the caretaker alarm
+            fires even when the phone is locked, the app is backgrounded,
+            or Flutter is paused.
+
+            foregroundServiceType="dataSync" is required on API 34+
+            for background network access.
+        -->
+        <service
+            android:name=".SosRealtimeService"
+            android:exported="false"
+            android:foregroundServiceType="dataSync" />
 
     </application>
 

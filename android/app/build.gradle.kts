@@ -42,6 +42,11 @@ android {
 
 dependencies {
     coreLibraryDesugaring("com.android.tools:desugar_jdk_libs:2.1.5")
+
+    // ✅ OkHttp for SosRealtimeService native WebSocket connection.
+    // This allows the caretaker's phone to receive SOS alerts from
+    // Supabase Realtime even when the app is backgrounded or locked.
+    implementation("com.squareup.okhttp3:okhttp:4.12.0")
 }
 
 kotlin {

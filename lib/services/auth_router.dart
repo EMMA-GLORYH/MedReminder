@@ -3,95 +3,263 @@
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 
-// ✅ FIXED: Normalized package path imports to solve Windows path-case duplicates
 import 'package:mar/auth/login_screen.dart';
 import 'package:mar/auth/onboarding_screen.dart';
-import 'package:mar/home/patient_home_screen.dart';
 import 'package:mar/home/caretaker_home_screen.dart';
+import 'package:mar/home/patient_home_screen.dart';
 import 'package:mar/services/auth_service.dart';
 
 class AuthRouter {
   AuthRouter._();
 
-  /// Returns the correct screen based on user's state
+  // ══════════════════════════════════════════════════════════════
+  // DETERMINE INITIAL SCREEN
+  // ══════════════════════════════════════════════════════════════
+
+  /// Returns the correct screen for the current authentication,
+  /// onboarding, and user-role state.
   static Future<Widget> getInitialScreen() async {
     final auth = AuthService.instance;
 
-    debugPrint('🔍 AuthRouter: Checking auth state...');
-    debugPrint('🔍 AuthRouter: isLoggedIn = ${auth.isLoggedIn}');
+    debugPrint(
+      '🔍 AuthRouter: Checking authentication state...',
+    );
+    debugPrint(
+      '🔍 AuthRouter: isLoggedIn = ${auth.isLoggedIn}',
+    );
 
     if (!auth.isLoggedIn) {
-      debugPrint('➡️ AuthRouter: Not logged in → LoginScreen');
+      debugPrint(
+        '➡️ AuthRouter: Not logged in → LoginScreen',
+      );
+
       return const LoginScreen();
     }
 
     try {
-      debugPrint('🔍 AuthRouter: Fetching profile...');
+      debugPrint(
+        '🔍 AuthRouter: Fetching current profile...',
+      );
+
       final profile = await auth.getCurrentProfile();
 
       if (profile == null) {
-        debugPrint('⚠️ AuthRouter: Profile is NULL → LoginScreen');
+        debugPrint(
+          '⚠️ AuthRouter: Profile is null → LoginScreen',
+        );
+
         return const LoginScreen();
       }
 
-      debugPrint('✅ AuthRouter: Profile loaded');
-      debugPrint('   - Name: ${profile.fullName}');
-      debugPrint('   - Role: ${profile.role}');
-      debugPrint('   - Onboarding done: ${profile.onboardingCompleted}');
+      debugPrint(
+        '✅ AuthRouter: Profile loaded',
+      );
+      debugPrint(
+        '   - Name: ${profile.fullName}',
+      );
+      debugPrint(
+        '   - Role: ${profile.role}',
+      );
+      debugPrint(
+        '   - Onboarding completed: '
+            '${profile.onboardingCompleted}',
+      );
 
       if (profile.needsOnboarding) {
-        debugPrint('➡️ AuthRouter: Needs onboarding → OnboardingScreen');
+        debugPrint(
+          '➡️ AuthRouter: Needs onboarding → '
+              'OnboardingScreen',
+        );
+
         return const OnboardingScreen();
       }
 
-      // ✅ FIXED: Safely fallback to an empty string if profile.role is null
-      final role = (profile.role ?? '').toLowerCase().trim();
+      final role =
+      (profile.role ?? '').toLowerCase().trim();
 
       if (role == 'patient') {
-        debugPrint('➡️ AuthRouter: Patient → PatientHomeScreen');
+        debugPrint(
+          '➡️ AuthRouter: Patient → PatientHomeScreen',
+        );
+
         return const PatientHomeScreen();
       }
 
-      if (role == 'caretaker' || role == 'caregiver' || profile.isCaretaker) {
-        debugPrint('➡️ AuthRouter: Caretaker → CaretakerHomeScreen');
+      if (role == 'caretaker' ||
+          role == 'caregiver' ||
+          profile.isCaretaker) {
+        debugPrint(
+          '➡️ AuthRouter: Caretaker → '
+              'CaretakerHomeScreen',
+        );
+
         return const CaretakerHomeScreen();
       }
 
-      debugPrint('⚠️ AuthRouter: Unknown role "$role" → OnboardingScreen');
+      debugPrint(
+        '⚠️ AuthRouter: Unknown role "$role" → '
+            'OnboardingScreen',
+      );
+
       return const OnboardingScreen();
-    } catch (e, stack) {
-      debugPrint('❌ AuthRouter ERROR: $e');
-      debugPrint('❌ Stack: $stack');
+    } catch (error, stack) {
+      debugPrint(
+        '❌ AuthRouter profile lookup failed: $error',
+      );
+      debugPrint('$stack');
+
+      /*
+       * Authentication or network errors must not prevent the app from
+       * presenting a valid screen. The user can retry from LoginScreen.
+       */
       return const LoginScreen();
     }
   }
 
-  /// Navigate to the correct screen after auth
-  /// Throws so caller can show error message
-  static Future<void> routeAfterAuth(BuildContext context) async {
-    debugPrint('🚀 AuthRouter.routeAfterAuth: Starting...');
+  // ══════════════════════════════════════════════════════════════
+  // NAVIGATE AFTER AUTHENTICATION CHECK
+  // ══════════════════════════════════════════════════════════════
+
+  /// Navigates to the appropriate authentication destination.
+  ///
+  /// This method only navigates when the route that requested the
+  /// authentication check is still the current route.
+  ///
+  /// If a medication reminder opens while the asynchronous profile lookup
+  /// is running, this method returns without changing the navigator. This
+  /// protects MedicationReminderScannerScreen from being removed by
+  /// pushAndRemoveUntil().
+  static Future<void> routeAfterAuth(
+      BuildContext context,
+      ) async {
+    debugPrint(
+      '🚀 AuthRouter.routeAfterAuth: Starting...',
+    );
+
+    if (!context.mounted) {
+      debugPrint(
+        '⚠️ AuthRouter: Context is not mounted',
+      );
+      return;
+    }
+
+    /*
+     * Capture the route that initiated authentication routing. Usually this
+     * is SplashScreen, but the method remains safe if called from another
+     * route.
+     */
+    final sourceRoute = ModalRoute.of(context);
+
+    if (sourceRoute == null) {
+      debugPrint(
+        '⚠️ AuthRouter: Calling context has no ModalRoute',
+      );
+      return;
+    }
+
+    /*
+     * Do not begin routing from a screen that is already covered by the
+     * medication reminder or another route.
+     */
+    if (!sourceRoute.isCurrent) {
+      debugPrint(
+        '⏸️ AuthRouter: Source route is not current; '
+            'navigation postponed',
+      );
+      return;
+    }
 
     final destination = await getInitialScreen();
 
     if (!context.mounted) {
-      debugPrint('❌ Context not mounted, cannot navigate');
+      debugPrint(
+        '⚠️ AuthRouter: Context was disposed while '
+            'checking authentication',
+      );
       return;
     }
 
-    debugPrint('🚀 Navigating to: ${destination.runtimeType}');
+    /*
+     * This is the critical alarm-screen protection.
+     *
+     * During getInitialScreen(), a native alarm can push the medication
+     * reminder above splash or login. If that happens, sourceRoute is no
+     * longer current and authentication navigation must not run.
+     */
+    if (!sourceRoute.isCurrent) {
+      debugPrint(
+        '⏸️ AuthRouter: A different route opened during '
+            'authentication lookup. Navigation cancelled.',
+      );
+      return;
+    }
 
-    Navigator.pushAndRemoveUntil(
-      context,
-      PageRouteBuilder(
-        transitionDuration: const Duration(milliseconds: 300),
-        pageBuilder: (_, animation, __) => destination,
-        transitionsBuilder: (_, animation, __, child) {
-          return FadeTransition(opacity: animation, child: child);
-        },
-      ),
-          (route) => false,
+    /*
+     * Confirm that the context still belongs to the same source route.
+     * This protects against the widget being moved or rebuilt under a
+     * different navigator.
+     */
+    final currentContextRoute = ModalRoute.of(context);
+
+    if (!identical(currentContextRoute, sourceRoute)) {
+      debugPrint(
+        '⏸️ AuthRouter: Source route changed before '
+            'navigation. Navigation cancelled.',
+      );
+      return;
+    }
+
+    final navigator = Navigator.of(context);
+
+    if (!navigator.mounted) {
+      debugPrint(
+        '⚠️ AuthRouter: Navigator is not mounted',
+      );
+      return;
+    }
+
+    debugPrint(
+      '🚀 AuthRouter: Navigating to '
+          '${destination.runtimeType}',
     );
 
-    debugPrint('✅ Navigation completed');
+    /*
+     * No await occurs between the final isCurrent check and this navigator
+     * operation. Therefore, another Dart route cannot be pushed between
+     * the safety check and pushAndRemoveUntil().
+     */
+    navigator.pushAndRemoveUntil<void>(
+      PageRouteBuilder<void>(
+        transitionDuration: const Duration(
+          milliseconds: 300,
+        ),
+        reverseTransitionDuration: const Duration(
+          milliseconds: 200,
+        ),
+        pageBuilder: (
+            BuildContext context,
+            Animation<double> animation,
+            Animation<double> secondaryAnimation,
+            ) {
+          return destination;
+        },
+        transitionsBuilder: (
+            BuildContext context,
+            Animation<double> animation,
+            Animation<double> secondaryAnimation,
+            Widget child,
+            ) {
+          return FadeTransition(
+            opacity: animation,
+            child: child,
+          );
+        },
+      ),
+          (Route<dynamic> route) => false,
+    );
+
+    debugPrint(
+      '✅ AuthRouter: Navigation requested',
+    );
   }
 }

@@ -37,18 +37,13 @@ class _MedicationsListViewState extends State<MedicationsListView> {
   List<Medication> _medications         = [];
   List<Medication> _filteredMedications = [];
   Map<String, bool> _hasScheduleMap     = {};
-  List<dynamic> _schedules              = []; // fetched once, reused per page
-  // ^ typed dynamic deliberately: this file doesn't need to know the exact
-  //   Schedule model shape, only that each item has a `.medicationId`.
-  //   Swap `List<dynamic>` for your real `List<Schedule>` type if you'd
-  //   rather have compile-time checking here.
-
-  bool _isFirstLoad   = true;  // true until first page (cache or live) shown
-  bool _isSyncing     = false; // refreshing the first page in the background
-  bool _isLoadingMore = false; // fetching the next index page
-  bool _hasMore       = true;  // whether another page might exist
-  int  _offset        = 0;     // next index to fetch from
-  int? _totalCount;            // accurate total from a lightweight count query
+  List<dynamic> _schedules              = [];
+  bool _isFirstLoad   = true;
+  bool _isSyncing     = false;
+  bool _isLoadingMore = false;
+  bool _hasMore       = true;
+  int  _offset        = 0;
+  int? _totalCount;
   String? _error;
 
   final TextEditingController _searchController = TextEditingController();
@@ -113,8 +108,8 @@ class _MedicationsListViewState extends State<MedicationsListView> {
   }
 
   // ── Index page 0 from the server — resets pagination state ──────────
-  Future<void> _syncFirstPageFromServer() async {
-    if (mounted) setState(() => _isSyncing = true);
+  Future<void> _syncFirstPageFromServer({bool forceRefresh = false}) async {
+    if (mounted && !forceRefresh) setState(() => _isSyncing = true);
 
     try {
       final results = await Future.wait([
@@ -184,8 +179,6 @@ class _MedicationsListViewState extends State<MedicationsListView> {
     } catch (e) {
       if (!mounted) return;
       setState(() => _isLoadingMore = false);
-      // Silent failure — the trailing "load more" row simply stays put
-      // and the user can trigger it again by scrolling.
     }
   }
 
@@ -201,17 +194,17 @@ class _MedicationsListViewState extends State<MedicationsListView> {
   /// Resets pagination back to page 0 and refetches — used after add/edit/
   /// delete and on pull-to-refresh, since those actions can change which
   /// items belong on page 0 (e.g. a newly added medication sorts first).
-  Future<void> _refreshAll() async {
+  Future<void> _refreshAll({bool forceRefresh = true}) async {
     _offset  = 0;
     _hasMore = true;
-    await _syncFirstPageFromServer();
+    await _syncFirstPageFromServer(forceRefresh: forceRefresh);
   }
 
   // ── Navigate then refresh ────────────────────────────────────────────
   Future<void> _go(Future<Object?> Function() navigate) async {
     final result = await navigate();
     if (result == true) {
-      await _refreshAll();
+      await _refreshAll(forceRefresh: false);
     }
   }
 
@@ -253,12 +246,14 @@ class _MedicationsListViewState extends State<MedicationsListView> {
                 .length,
             searchController: _searchController,
             onClearSearch:    () => _searchController.clear(),
+            onRefresh: _refreshAll,
+            isRefreshing: _isSyncing,
           ),
 
           // Thin progress bar — visible while the first page is syncing.
           AnimatedContainer(
             duration: const Duration(milliseconds: 300),
-            height:   _isSyncing ? 3 : 0,
+            height:   _isSyncing && !_isFirstLoad ? 3 : 0,
             child: LinearProgressIndicator(
               backgroundColor: Colors.transparent,
               valueColor: AlwaysStoppedAnimation<Color>(
@@ -288,7 +283,7 @@ class _MedicationsListViewState extends State<MedicationsListView> {
     if (_isFirstLoad) return const _LoadingSkeleton();
 
     if (_error != null && _medications.isEmpty) {
-      return _ErrorView(message: _error!, onRetry: _refreshAll);
+      return _ErrorView(message: _error!, onRetry: () => _refreshAll(forceRefresh: true));
     }
 
     if (_medications.isEmpty) {
@@ -323,7 +318,7 @@ class _MedicationsListViewState extends State<MedicationsListView> {
 
     return RefreshIndicator(
       color:     AppColors.primary,
-      onRefresh: _refreshAll,
+      onRefresh: () => _refreshAll(forceRefresh: true),
       child: ListView.separated(
         controller:       _scrollController,
         padding:          const EdgeInsets.fromLTRB(16, 16, 16, 80),
@@ -331,8 +326,6 @@ class _MedicationsListViewState extends State<MedicationsListView> {
         separatorBuilder: (_, __) => const SizedBox(height: 2),
         itemBuilder: (context, index) {
           if (index >= _filteredMedications.length) {
-            // Trailing row: spinner while a page is in flight, otherwise
-            // an invisible sentinel that simply triggers _onScroll.
             return Padding(
               padding: const EdgeInsets.symmetric(vertical: 20),
               child: Center(
@@ -363,8 +356,21 @@ class _MedicationsListViewState extends State<MedicationsListView> {
                 context,
                 MaterialPageRoute(
                   builder: (_) => AddScheduleScreen(
-                    medicationId:   med.id,
+                    medicationId: med.id,
                     medicationName: med.displayName,
+                    onOptimisticDoses: (doses) {
+                      // The medications list doesn't have _scheduleKey,
+                      // so it can't show optimistic doses. But if you
+                      // later want to add that, the callback is ready.
+                      debugPrint('Optimistic doses: ${doses.length}');
+                    },
+                    onSaveCompleted: () {
+                      // Refresh the list after save completes.
+                      _refreshAll(forceRefresh: false);
+                    },
+                    onSaveFailed: (error) {
+                      debugPrint('Save failed: $error');
+                    },
                   ),
                 ),
               ),

@@ -2,13 +2,19 @@
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
+
 import '../main.dart';
 import '../models/medication_schedule.dart';
 import 'auth_service.dart';
 import 'local_notification_service.dart';
 
-/// Single source of truth for TodayDose - used by scanner and dashboard
+/// Single source of truth for a scheduled dose.
+///
+/// [patientId] is optional for backward compatibility, but alarm-created
+/// doses should always contain it. This allows a dose acknowledged while
+/// logged out to synchronize to the correct patient later.
 class TodayDose {
+  final String? patientId;
   final String scheduleId;
   final String medicationId;
   final String medicationName;
@@ -17,11 +23,13 @@ class TodayDose {
   final String dosageUnit;
   final String? pillColor;
   final String? pillShape;
-  final String? pillImageUrl;           // Used by scanner screen
+  final String? pillImageUrl;
   final DateTime scheduledTime;
   final String? notes;
+  final bool isPending;
 
-  TodayDose({
+  const TodayDose({
+    this.patientId,
     required this.scheduleId,
     required this.medicationId,
     required this.medicationName,
@@ -33,31 +41,43 @@ class TodayDose {
     this.pillImageUrl,
     required this.scheduledTime,
     this.notes,
+    this.isPending = false,
   });
 
   String get dosageDisplay {
     final amount = dosageAmount % 1 == 0
         ? dosageAmount.toInt().toString()
         : dosageAmount.toString();
+
     return '$amount $dosageUnit';
   }
 
-  bool get isPast => DateTime.now().isAfter(scheduledTime);
-  bool get isUpcoming => scheduledTime.isAfter(DateTime.now());
+  bool get isPast {
+    return DateTime.now().isAfter(scheduledTime);
+  }
+
+  bool get isUpcoming {
+    return scheduledTime.isAfter(DateTime.now());
+  }
 
   bool get isDueSoon {
-    final diff = scheduledTime.difference(DateTime.now()).inMinutes;
-    return diff >= 0 && diff <= 30;
+    final difference =
+        scheduledTime.difference(DateTime.now()).inMinutes;
+
+    return difference >= 0 && difference <= 30;
   }
 }
 
 class ScheduleService {
   ScheduleService._();
-  static final ScheduleService instance = ScheduleService._();
+
+  static final ScheduleService instance =
+  ScheduleService._();
 
   // ══════════════════════════════════════════════════════════════
-  // CREATE SCHEDULE + SET DEVICE ALARMS
+  // CREATE SCHEDULE AND SET DEVICE ALARMS
   // ══════════════════════════════════════════════════════════════
+
   Future<MedicationSchedule> addSchedule({
     required String medicationId,
     required String medicationName,
@@ -72,81 +92,164 @@ class ScheduleService {
     bool escalationEnabled = true,
     int escalationStep1Mins = 10,
     int escalationStep2Mins = 20,
-  }) async {
-    final userId = AuthService.instance.currentUser?.id;
-    if (userId == null) throw Exception('You must be logged in');
 
-    debugPrint('📅 Adding schedule for: $medicationName');
+    /*
+     * Existing callers are not required to provide this. When omitted,
+     * ScheduleService retrieves medications.pill_image_url from Supabase
+     * before creating the native alarm payload.
+     */
+    String? pillImageUrl,
+  }) async {
+    final userId =
+        AuthService.instance.currentUser?.id;
+
+    if (userId == null) {
+      throw Exception(
+        'You must be logged in to create a schedule',
+      );
+    }
+
+    final safeMedicationId = medicationId.trim();
+    final safeMedicationName = medicationName.trim();
+    final safeDosageDisplay = dosageDisplay.trim();
+    final safeFrequencyType =
+    frequencyType.trim().toLowerCase();
+
+    if (safeMedicationId.isEmpty) {
+      throw ArgumentError.value(
+        medicationId,
+        'medicationId',
+        'Medication ID cannot be empty',
+      );
+    }
+
+    if (safeMedicationName.isEmpty) {
+      throw ArgumentError.value(
+        medicationName,
+        'medicationName',
+        'Medication name cannot be empty',
+      );
+    }
+
+    debugPrint(
+      '📅 Adding schedule for: $safeMedicationName',
+    );
+
+    final resolvedPillImageUrl =
+    await _resolvePillImageUrl(
+      medicationId: safeMedicationId,
+      patientId: userId,
+      suppliedImageUrl: pillImageUrl,
+    );
 
     final timesArray = scheduledTimes
-        ?.map((t) =>
-    '${t.hour.toString().padLeft(2, '0')}:${t.minute.toString().padLeft(2, '0')}:00')
+        ?.map(
+          (time) =>
+      '${time.hour.toString().padLeft(2, '0')}:'
+          '${time.minute.toString().padLeft(2, '0')}:00',
+    )
         .toList();
 
+    final effectiveStartDate =
+        startDate ?? DateTime.now();
+
     final nextScheduled = _computeNextScheduled(
-      frequencyType: frequencyType,
+      frequencyType: safeFrequencyType,
       scheduledTimes: scheduledTimes,
       intervalHours: intervalHours,
-      startDate: startDate ?? DateTime.now(),
+      startDate: effectiveStartDate,
     );
 
     try {
-      final data = await supabase.from('medication_schedules').insert({
-        'medication_id': medicationId,
-        'patient_id': userId,
-        'frequency_type': frequencyType,
-        'interval_hours': intervalHours,
-        'min_hours_between': minHoursBetween,
-        'scheduled_times': timesArray,
-        'scheduled_days': scheduledDays,
-        'start_date': (startDate ?? DateTime.now()).toIso8601String().split('T').first,
-        'end_date': endDate?.toIso8601String().split('T').first,
-        'next_scheduled_at': nextScheduled?.toIso8601String(),
-        'escalation_enabled': escalationEnabled,
-        'escalation_step1_mins': escalationStep1Mins,
-        'escalation_step2_mins': escalationStep2Mins,
-        'is_active': true,
-      }).select().single();
+      final data = await supabase
+          .from('medication_schedules')
+          .insert(
+        <String, dynamic>{
+          'medication_id': safeMedicationId,
+          'patient_id': userId,
+          'frequency_type': safeFrequencyType,
+          'interval_hours': intervalHours,
+          'min_hours_between': minHoursBetween,
+          'scheduled_times': timesArray,
+          'scheduled_days': scheduledDays,
+          'start_date': effectiveStartDate
+              .toIso8601String()
+              .split('T')
+              .first,
+          'end_date': endDate
+              ?.toIso8601String()
+              .split('T')
+              .first,
+          'next_scheduled_at':
+          nextScheduled?.toIso8601String(),
+          'escalation_enabled': escalationEnabled,
+          'escalation_step1_mins':
+          escalationStep1Mins,
+          'escalation_step2_mins':
+          escalationStep2Mins,
+          'is_active': true,
+        },
+      ).select().single();
 
-      final schedule = MedicationSchedule.fromJson(data);
-      debugPrint('✅ Supabase schedule saved: ${schedule.id}');
+      final schedule =
+      MedicationSchedule.fromJson(data);
 
-      if (frequencyType != 'as_needed' &&
+      debugPrint(
+        '✅ Supabase schedule saved: ${schedule.id}',
+      );
+
+      if (safeFrequencyType != 'as_needed' &&
           scheduledTimes != null &&
           scheduledTimes.isNotEmpty) {
         final futureTimes = _buildFutureDateTimes(
           scheduledTimes: scheduledTimes,
-          startDate: startDate ?? DateTime.now(),
+          startDate: effectiveStartDate,
           endDate: endDate,
           scheduledDays: scheduledDays,
         );
 
-        int alarmCount = 0;
-        for (final time in futureTimes) {
-          await LocalNotificationService.instance.scheduleForDose(
+        var alarmCount = 0;
+
+        for (final scheduledTime in futureTimes) {
+          await LocalNotificationService.instance
+              .scheduleForDose(
+            patientId: userId,
             scheduleId: schedule.id,
-            medicationId: medicationId,
-            medicationName: medicationName,
-            dosageDisplay: dosageDisplay,
-            scheduledFor: time,
-            escalationStep1Mins: escalationStep1Mins,
-            escalationStep2Mins: escalationStep2Mins,
+            medicationId: safeMedicationId,
+            medicationName: safeMedicationName,
+            dosageDisplay: safeDosageDisplay,
+            scheduledFor: scheduledTime,
+            pillImageUrl: resolvedPillImageUrl,
+            escalationStep1Mins:
+            escalationStep1Mins,
+            escalationStep2Mins:
+            escalationStep2Mins,
           );
+
           alarmCount++;
         }
-        debugPrint('🔔 Scheduled $alarmCount local alarms');
+
+        debugPrint(
+          '🔔 Scheduled $alarmCount local alarms '
+              'with pill image payload',
+        );
       }
 
       return schedule;
-    } catch (e) {
-      debugPrint('❌ Failed to save schedule: $e');
+    } catch (error, stack) {
+      debugPrint(
+        '❌ Failed to save schedule: $error',
+      );
+      debugPrint('$stack');
+
       rethrow;
     }
   }
 
   // ══════════════════════════════════════════════════════════════
-  // UPDATE SCHEDULE + RESET DEVICE ALARMS
+  // UPDATE SCHEDULE AND RESET DEVICE ALARMS
   // ══════════════════════════════════════════════════════════════
+
   Future<MedicationSchedule> updateSchedule({
     required String id,
     required String medicationId,
@@ -162,79 +265,160 @@ class ScheduleService {
     bool escalationEnabled = true,
     int escalationStep1Mins = 10,
     int escalationStep2Mins = 20,
+    String? pillImageUrl,
   }) async {
-    debugPrint('📅 Updating schedule: $id for $medicationName');
+    final userId =
+        AuthService.instance.currentUser?.id;
+
+    if (userId == null) {
+      throw Exception(
+        'You must be logged in to update a schedule',
+      );
+    }
+
+    final safeScheduleId = id.trim();
+    final safeMedicationId = medicationId.trim();
+    final safeMedicationName = medicationName.trim();
+    final safeDosageDisplay = dosageDisplay.trim();
+    final safeFrequencyType =
+    frequencyType.trim().toLowerCase();
+
+    if (safeScheduleId.isEmpty) {
+      throw ArgumentError.value(
+        id,
+        'id',
+        'Schedule ID cannot be empty',
+      );
+    }
+
+    debugPrint(
+      '📅 Updating schedule: '
+          '$safeScheduleId for $safeMedicationName',
+    );
+
+    final resolvedPillImageUrl =
+    await _resolvePillImageUrl(
+      medicationId: safeMedicationId,
+      patientId: userId,
+      suppliedImageUrl: pillImageUrl,
+    );
 
     final timesArray = scheduledTimes
-        ?.map((t) =>
-    '${t.hour.toString().padLeft(2, '0')}:${t.minute.toString().padLeft(2, '0')}:00')
+        ?.map(
+          (time) =>
+      '${time.hour.toString().padLeft(2, '0')}:'
+          '${time.minute.toString().padLeft(2, '0')}:00',
+    )
         .toList();
 
+    final effectiveStartDate =
+        startDate ?? DateTime.now();
+
     final nextScheduled = _computeNextScheduled(
-      frequencyType: frequencyType,
+      frequencyType: safeFrequencyType,
       scheduledTimes: scheduledTimes,
       intervalHours: intervalHours,
-      startDate: startDate ?? DateTime.now(),
+      startDate: effectiveStartDate,
     );
 
     try {
-      // Cancel old alarms first so no duplicates fire
-      await LocalNotificationService.instance.cancelSchedule(id);
-      debugPrint('🔕 Cancelled old alarms for schedule $id');
+      /*
+       * Cancel the old alarms before scheduling replacements so old and
+       * updated reminders cannot fire for the same schedule.
+       */
+      await LocalNotificationService.instance
+          .cancelSchedule(safeScheduleId);
+
+      debugPrint(
+        '🔕 Cancelled old alarms for schedule '
+            '$safeScheduleId',
+      );
 
       final data = await supabase
           .from('medication_schedules')
-          .update({
-        'frequency_type': frequencyType,
-        'interval_hours': intervalHours,
-        'min_hours_between': minHoursBetween,
-        'scheduled_times': timesArray,
-        'scheduled_days': scheduledDays,
-        'start_date': (startDate ?? DateTime.now()).toIso8601String().split('T').first,
-        'end_date': endDate?.toIso8601String().split('T').first,
-        'next_scheduled_at': nextScheduled?.toIso8601String(),
-        'escalation_enabled': escalationEnabled,
-        'escalation_step1_mins': escalationStep1Mins,
-        'escalation_step2_mins': escalationStep2Mins,
-        'updated_at': DateTime.now().toIso8601String(),
-      })
-          .eq('id', id)
+          .update(
+        <String, dynamic>{
+          'medication_id': safeMedicationId,
+          'frequency_type': safeFrequencyType,
+          'interval_hours': intervalHours,
+          'min_hours_between': minHoursBetween,
+          'scheduled_times': timesArray,
+          'scheduled_days': scheduledDays,
+          'start_date': effectiveStartDate
+              .toIso8601String()
+              .split('T')
+              .first,
+          'end_date': endDate
+              ?.toIso8601String()
+              .split('T')
+              .first,
+          'next_scheduled_at':
+          nextScheduled?.toIso8601String(),
+          'escalation_enabled': escalationEnabled,
+          'escalation_step1_mins':
+          escalationStep1Mins,
+          'escalation_step2_mins':
+          escalationStep2Mins,
+          'updated_at':
+          DateTime.now().toIso8601String(),
+        },
+      )
+          .eq('id', safeScheduleId)
+          .eq('patient_id', userId)
           .select()
           .single();
 
-      final schedule = MedicationSchedule.fromJson(data);
-      debugPrint('✅ Supabase schedule updated: ${schedule.id}');
+      final schedule =
+      MedicationSchedule.fromJson(data);
 
-      // Re-schedule fresh alarms with new times
-      if (frequencyType != 'as_needed' &&
+      debugPrint(
+        '✅ Supabase schedule updated: ${schedule.id}',
+      );
+
+      if (safeFrequencyType != 'as_needed' &&
           scheduledTimes != null &&
           scheduledTimes.isNotEmpty) {
         final futureTimes = _buildFutureDateTimes(
           scheduledTimes: scheduledTimes,
-          startDate: startDate ?? DateTime.now(),
+          startDate: effectiveStartDate,
           endDate: endDate,
           scheduledDays: scheduledDays,
         );
 
-        int alarmCount = 0;
-        for (final time in futureTimes) {
-          await LocalNotificationService.instance.scheduleForDose(
+        var alarmCount = 0;
+
+        for (final scheduledTime in futureTimes) {
+          await LocalNotificationService.instance
+              .scheduleForDose(
+            patientId: userId,
             scheduleId: schedule.id,
-            medicationId: medicationId,
-            medicationName: medicationName,
-            dosageDisplay: dosageDisplay,
-            scheduledFor: time,
-            escalationStep1Mins: escalationStep1Mins,
-            escalationStep2Mins: escalationStep2Mins,
+            medicationId: safeMedicationId,
+            medicationName: safeMedicationName,
+            dosageDisplay: safeDosageDisplay,
+            scheduledFor: scheduledTime,
+            pillImageUrl: resolvedPillImageUrl,
+            escalationStep1Mins:
+            escalationStep1Mins,
+            escalationStep2Mins:
+            escalationStep2Mins,
           );
+
           alarmCount++;
         }
-        debugPrint('🔔 Re-scheduled $alarmCount alarms');
+
+        debugPrint(
+          '🔔 Re-scheduled $alarmCount alarms '
+              'with pill image payload',
+        );
       }
 
       return schedule;
-    } catch (e) {
-      debugPrint('❌ Failed to update schedule: $e');
+    } catch (error, stack) {
+      debugPrint(
+        '❌ Failed to update schedule: $error',
+      );
+      debugPrint('$stack');
+
       rethrow;
     }
   }
@@ -242,91 +426,204 @@ class ScheduleService {
   // ══════════════════════════════════════════════════════════════
   // READ SCHEDULES
   // ══════════════════════════════════════════════════════════════
-  Future<List<MedicationSchedule>> getMySchedules() async {
-    final userId = AuthService.instance.currentUser?.id;
-    if (userId == null) throw Exception('Not logged in');
+
+  Future<List<MedicationSchedule>>
+  getMySchedules() async {
+    final userId =
+        AuthService.instance.currentUser?.id;
+
+    if (userId == null) {
+      throw Exception('Not logged in');
+    }
 
     final data = await supabase
         .from('medication_schedules')
         .select()
         .eq('patient_id', userId)
         .eq('is_active', true)
-        .order('next_scheduled_at', ascending: true);
+        .order(
+      'next_scheduled_at',
+      ascending: true,
+    );
 
     return (data as List)
-        .map((json) => MedicationSchedule.fromJson(json))
+        .map(
+          (json) => MedicationSchedule.fromJson(
+        Map<String, dynamic>.from(json as Map),
+      ),
+    )
         .toList();
   }
 
-  Future<List<MedicationSchedule>> getSchedulesForMedication(String medicationId) async {
+  Future<List<MedicationSchedule>>
+  getSchedulesForMedication(
+      String medicationId,
+      ) async {
+    final userId =
+        AuthService.instance.currentUser?.id;
+
+    if (userId == null) {
+      throw Exception('Not logged in');
+    }
+
     final data = await supabase
         .from('medication_schedules')
         .select()
+        .eq('patient_id', userId)
         .eq('medication_id', medicationId)
         .eq('is_active', true);
 
     return (data as List)
-        .map((json) => MedicationSchedule.fromJson(json))
+        .map(
+          (json) => MedicationSchedule.fromJson(
+        Map<String, dynamic>.from(json as Map),
+      ),
+    )
         .toList();
   }
 
   // ══════════════════════════════════════════════════════════════
   // DELETE SCHEDULE
   // ══════════════════════════════════════════════════════════════
-  Future<void> deleteSchedule(String id) async {
-    await supabase.from('medication_schedules').update({
-      'is_active': false,
-      'updated_at': DateTime.now().toIso8601String(),
-    }).eq('id', id);
 
-    await LocalNotificationService.instance.cancelSchedule(id);
-    debugPrint('🗑️ Deleted schedule $id');
+  Future<void> deleteSchedule(
+      String id,
+      ) async {
+    final userId =
+        AuthService.instance.currentUser?.id;
+
+    if (userId == null) {
+      throw Exception('Not logged in');
+    }
+
+    final scheduleId = id.trim();
+
+    await supabase
+        .from('medication_schedules')
+        .update(
+      <String, dynamic>{
+        'is_active': false,
+        'updated_at':
+        DateTime.now().toIso8601String(),
+      },
+    )
+        .eq('id', scheduleId)
+        .eq('patient_id', userId);
+
+    await LocalNotificationService.instance
+        .cancelSchedule(scheduleId);
+
+    debugPrint(
+      '🗑️ Deleted schedule $scheduleId',
+    );
   }
 
   // ══════════════════════════════════════════════════════════════
   // GET DOSES FOR A SPECIFIC DATE
   // ══════════════════════════════════════════════════════════════
-  Future<List<TodayDose>> getDosesForDate(DateTime date) async {
-    final userId = AuthService.instance.currentUser?.id;
-    if (userId == null) throw Exception('Not logged in');
 
-    final dateStr = date.toIso8601String().split('T').first;
-    debugPrint('📅 Loading doses for $dateStr');
+  Future<List<TodayDose>> getDosesForDate(
+      DateTime date,
+      ) async {
+    final userId =
+        AuthService.instance.currentUser?.id;
+
+    if (userId == null) {
+      throw Exception('Not logged in');
+    }
+
+    final dateString =
+        date.toIso8601String().split('T').first;
+
+    debugPrint(
+      '📅 Loading doses for $dateString',
+    );
 
     try {
       final data = await supabase
           .from('medication_schedules')
-          .select('*, medications!inner(pill_image_url, *)')
+          .select(
+        '*, medications!inner(pill_image_url, *)',
+      )
           .eq('patient_id', userId)
           .eq('is_active', true)
-          .lte('start_date', dateStr);
+          .lte('start_date', dateString);
 
       final doses = <TodayDose>[];
       final weekday = date.weekday;
 
-      for (final row in data as List) {
-        final schedule = row as Map<String, dynamic>;
-        final medication = schedule['medications'] as Map<String, dynamic>;
+      for (final rawRow in data as List) {
+        final schedule =
+        Map<String, dynamic>.from(
+          rawRow as Map,
+        );
+
+        final medication =
+        Map<String, dynamic>.from(
+          schedule['medications'] as Map,
+        );
 
         if (schedule['end_date'] != null) {
-          final endDate = DateTime.parse(schedule['end_date'] as String);
-          if (date.isAfter(endDate)) continue;
+          final scheduleEndDate = DateTime.parse(
+            schedule['end_date'].toString(),
+          );
+
+          final selectedDay = DateTime(
+            date.year,
+            date.month,
+            date.day,
+          );
+
+          final normalizedEndDate = DateTime(
+            scheduleEndDate.year,
+            scheduleEndDate.month,
+            scheduleEndDate.day,
+          );
+
+          if (selectedDay.isAfter(normalizedEndDate)) {
+            continue;
+          }
         }
 
-        if (schedule['frequency_type'] == 'as_needed') continue;
+        if (schedule['frequency_type'] ==
+            'as_needed') {
+          continue;
+        }
 
-        final scheduledDays = schedule['scheduled_days'] as List?;
+        final scheduledDays =
+        schedule['scheduled_days'] as List?;
+
         if (scheduledDays != null &&
             scheduledDays.isNotEmpty &&
-            !scheduledDays.contains(weekday)) continue;
+            !scheduledDays.contains(weekday)) {
+          continue;
+        }
 
-        final timesRaw = schedule['scheduled_times'] as List?;
-        if (timesRaw == null || timesRaw.isEmpty) continue;
+        final scheduledTimes =
+        schedule['scheduled_times'] as List?;
 
-        for (final timeStr in timesRaw) {
-          final parts = (timeStr as String).split(':');
-          final hour = int.parse(parts[0]);
-          final minute = int.parse(parts[1]);
+        if (scheduledTimes == null ||
+            scheduledTimes.isEmpty) {
+          continue;
+        }
+
+        for (final rawTime in scheduledTimes) {
+          final parts =
+          rawTime.toString().split(':');
+
+          if (parts.length < 2) {
+            continue;
+          }
+
+          final hour =
+          int.tryParse(parts[0]);
+
+          final minute =
+          int.tryParse(parts[1]);
+
+          if (hour == null || minute == null) {
+            continue;
+          }
 
           final doseTime = DateTime(
             date.year,
@@ -336,36 +633,149 @@ class ScheduleService {
             minute,
           );
 
-          doses.add(TodayDose(
-            scheduleId: schedule['id'] as String,
-            medicationId: medication['id'] as String,
-            medicationName: (medication['brand_name'] as String?) ??
-                medication['generic_name'] as String,
-            genericName: medication['generic_name'] as String,
-            dosageAmount: (medication['dosage_amount'] as num).toDouble(),
-            dosageUnit: medication['dosage_unit'] as String,
-            pillColor: medication['pill_color'] as String?,
-            pillShape: medication['pill_shape'] as String?,
-            pillImageUrl: medication['pill_image_url'] as String?,
-            scheduledTime: doseTime,
-            notes: medication['notes'] as String?,
-          ));
+          final genericName =
+              medication['generic_name']
+                  ?.toString()
+                  .trim() ??
+                  'Medication';
+
+          final brandName =
+          medication['brand_name']
+              ?.toString()
+              .trim();
+
+          final medicationName =
+          brandName != null &&
+              brandName.isNotEmpty
+              ? brandName
+              : genericName;
+
+          doses.add(
+            TodayDose(
+              patientId: userId,
+              scheduleId:
+              schedule['id'].toString(),
+              medicationId:
+              medication['id'].toString(),
+              medicationName: medicationName,
+              genericName: genericName,
+              dosageAmount:
+              (medication['dosage_amount'] as num)
+                  .toDouble(),
+              dosageUnit:
+              medication['dosage_unit']
+                  .toString(),
+              pillColor:
+              medication['pill_color']
+                  ?.toString(),
+              pillShape:
+              medication['pill_shape']
+                  ?.toString(),
+              pillImageUrl:
+              _cleanOptionalString(
+                medication['pill_image_url']
+                    ?.toString(),
+              ),
+              scheduledTime: doseTime,
+              notes:
+              medication['notes']?.toString(),
+            ),
+          );
         }
       }
 
-      doses.sort((a, b) => a.scheduledTime.compareTo(b.scheduledTime));
-      debugPrint('✅ Loaded ${doses.length} doses for today');
+      doses.sort(
+            (first, second) =>
+            first.scheduledTime.compareTo(
+              second.scheduledTime,
+            ),
+      );
+
+      debugPrint(
+        '✅ Loaded ${doses.length} doses for today',
+      );
+
       return doses;
-    } catch (e, st) {
-      debugPrint('❌ Failed to load doses: $e');
-      debugPrint('$st');
+    } catch (error, stack) {
+      debugPrint(
+        '❌ Failed to load doses: $error',
+      );
+      debugPrint('$stack');
+
       rethrow;
     }
   }
 
   // ══════════════════════════════════════════════════════════════
-  // PRIVATE HELPERS
+  // PILL IMAGE LOOKUP
   // ══════════════════════════════════════════════════════════════
+
+  Future<String?> _resolvePillImageUrl({
+    required String medicationId,
+    required String patientId,
+    String? suppliedImageUrl,
+  }) async {
+    final supplied =
+    _cleanOptionalString(suppliedImageUrl);
+
+    if (supplied != null) {
+      return supplied;
+    }
+
+    try {
+      final data = await supabase
+          .from('medications')
+          .select('pill_image_url')
+          .eq('id', medicationId)
+          .eq('patient_id', patientId)
+          .maybeSingle();
+
+      final imageUrl = _cleanOptionalString(
+        data?['pill_image_url']?.toString(),
+      );
+
+      if (imageUrl == null) {
+        debugPrint(
+          'ℹ️ Medication $medicationId has no pill image',
+        );
+      } else {
+        debugPrint(
+          '✅ Pill image URL loaded for alarm payload',
+        );
+      }
+
+      return imageUrl;
+    } catch (error, stack) {
+      /*
+       * Image lookup failure must not stop the medication schedule from
+       * being created. The reminder will show its no-image placeholder.
+       */
+      debugPrint(
+        '⚠️ Could not load pill image for alarm payload: '
+            '$error',
+      );
+      debugPrint('$stack');
+
+      return null;
+    }
+  }
+
+  static String? _cleanOptionalString(
+      String? value,
+      ) {
+    final cleaned = value?.trim();
+
+    if (cleaned == null || cleaned.isEmpty) {
+      return null;
+    }
+
+    return cleaned;
+  }
+
+  // ══════════════════════════════════════════════════════════════
+  // SCHEDULING HELPERS
+  // ══════════════════════════════════════════════════════════════
+
   static DateTime? _computeNextScheduled({
     required String frequencyType,
     List<TimeOfDay>? scheduledTimes,
@@ -377,8 +787,28 @@ class ScheduleService {
     switch (frequencyType) {
       case 'daily':
       case 'multiple_daily':
-        if (scheduledTimes == null || scheduledTimes.isEmpty) return null;
-        for (final time in scheduledTimes) {
+        if (scheduledTimes == null ||
+            scheduledTimes.isEmpty) {
+          return null;
+        }
+
+        final orderedTimes =
+        List<TimeOfDay>.from(scheduledTimes)
+          ..sort(
+                (first, second) {
+              final firstMinutes =
+                  first.hour * 60 + first.minute;
+
+              final secondMinutes =
+                  second.hour * 60 + second.minute;
+
+              return firstMinutes.compareTo(
+                secondMinutes,
+              );
+            },
+          );
+
+        for (final time in orderedTimes) {
           final candidate = DateTime(
             now.year,
             now.month,
@@ -386,9 +816,14 @@ class ScheduleService {
             time.hour,
             time.minute,
           );
-          if (candidate.isAfter(now)) return candidate;
+
+          if (candidate.isAfter(now)) {
+            return candidate;
+          }
         }
-        final first = scheduledTimes.first;
+
+        final first = orderedTimes.first;
+
         return DateTime(
           now.year,
           now.month,
@@ -398,8 +833,16 @@ class ScheduleService {
         );
 
       case 'every_x_hours':
-        if (intervalHours == null) return null;
-        return now.add(Duration(minutes: (intervalHours * 60).round()));
+        if (intervalHours == null ||
+            intervalHours <= 0) {
+          return null;
+        }
+
+        return now.add(
+          Duration(
+            minutes: (intervalHours * 60).round(),
+          ),
+        );
 
       case 'as_needed':
         return null;
@@ -418,30 +861,65 @@ class ScheduleService {
   }) {
     final result = <DateTime>[];
     final now = DateTime.now();
-    final limit = endDate ?? now.add(Duration(days: daysAhead));
 
-    DateTime cursor = DateTime(startDate.year, startDate.month, startDate.day);
+    final defaultLimit = now.add(
+      Duration(days: daysAhead),
+    );
 
-    while (!cursor.isAfter(limit)) {
+    final limit = endDate != null &&
+        endDate.isBefore(defaultLimit)
+        ? endDate
+        : defaultLimit;
+
+    var cursor = DateTime(
+      startDate.year,
+      startDate.month,
+      startDate.day,
+    );
+
+    final normalizedLimit = DateTime(
+      limit.year,
+      limit.month,
+      limit.day,
+      23,
+      59,
+      59,
+    );
+
+    while (!cursor.isAfter(normalizedLimit)) {
       final weekday = cursor.weekday;
-      final dayAllowed = scheduledDays == null ||
-          scheduledDays.isEmpty ||
-          scheduledDays.contains(weekday);
+
+      final dayAllowed =
+          scheduledDays == null ||
+              scheduledDays.isEmpty ||
+              scheduledDays.contains(weekday);
 
       if (dayAllowed) {
-        for (final t in scheduledTimes) {
-          final dt = DateTime(
+        for (final time in scheduledTimes) {
+          final scheduledDateTime = DateTime(
             cursor.year,
             cursor.month,
             cursor.day,
-            t.hour,
-            t.minute,
+            time.hour,
+            time.minute,
           );
-          if (dt.isAfter(now)) result.add(dt);
+
+          if (scheduledDateTime.isAfter(now) &&
+              !scheduledDateTime.isAfter(
+                normalizedLimit,
+              )) {
+            result.add(scheduledDateTime);
+          }
         }
       }
-      cursor = cursor.add(const Duration(days: 1));
+
+      cursor = cursor.add(
+        const Duration(days: 1),
+      );
     }
+
+    result.sort();
+
     return result;
   }
 }

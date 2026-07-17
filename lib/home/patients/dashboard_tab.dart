@@ -146,16 +146,24 @@ class _DashboardTabState extends State<DashboardTab> {
   Future<void> _scheduleUpcomingNotifications(
       List<TodayDose> doses, Set<String> logged) async {
     try {
+      final userId = AuthService.instance.currentUser?.id;
+      if (userId == null) return;
+
       for (final dose in doses) {
-        final key     = _doseKey(dose.scheduleId, dose.scheduledTime);
+        final key = _doseKey(dose.scheduleId, dose.scheduledTime);
         final isTaken = logged.contains(key);
+
         if (!isTaken && dose.scheduledTime.isAfter(DateTime.now())) {
+          final effectivePatientId = dose.patientId ?? userId;
+          if (effectivePatientId.trim().isEmpty) continue;
+
           await LocalNotificationService.instance.scheduleForDose(
-            scheduleId:     dose.scheduleId,
-            medicationId:   dose.medicationId,
+            patientId: effectivePatientId, // ✅ NEW
+            scheduleId: dose.scheduleId,
+            medicationId: dose.medicationId,
             medicationName: dose.medicationName,
-            dosageDisplay:  dose.dosageDisplay,
-            scheduledFor:   dose.scheduledTime,
+            dosageDisplay: dose.dosageDisplay,
+            scheduledFor: dose.scheduledTime,
           );
         }
       }

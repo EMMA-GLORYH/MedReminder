@@ -2,10 +2,10 @@
 
 import 'package:flutter/foundation.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
-import 'sos_location_service.dart';
 
 import '../main.dart';
 import 'auth_service.dart';
+import 'sos_location_service.dart';
 
 class SosCaretakerContact {
   final String id;
@@ -69,6 +69,10 @@ class SosService {
 
     return userId;
   }
+
+  // ══════════════════════════════════════════════════════════════
+  // SEND SOS WITH LOCATION
+  // ══════════════════════════════════════════════════════════════
 
   Future<SosDispatchResult> sendSos({
     String message = 'Patient requested urgent assistance',
@@ -194,7 +198,9 @@ class SosService {
           alertIds.add(alertId);
         }
 
-        if (caregiverId == null || caregiverId.isEmpty) continue;
+        if (caregiverId == null || caregiverId.isEmpty) {
+          continue;
+        }
 
         contacts[caregiverId] = SosCaretakerContact(
           id: caregiverId,
@@ -229,6 +235,10 @@ class SosService {
     }
   }
 
+  // ══════════════════════════════════════════════════════════════
+  // LOAD CARETAKER ALERTS INCLUDING PATIENT LOCATION
+  // ══════════════════════════════════════════════════════════════
+
   Future<List<Map<String, dynamic>>> getCaretakerAlerts() async {
     final caregiverId = _requireCurrentUserId();
 
@@ -241,8 +251,13 @@ class SosService {
           patient_id,
           caregiver_id,
           request_key,
+          patient_name,
           message,
           status,
+          latitude,
+          longitude,
+          location_accuracy_m,
+          location_captured_at,
           acknowledged_at,
           resolved_at,
           created_at,
@@ -253,19 +268,32 @@ class SosService {
             phone_number,
             avatar_url
           )
-          patient_name,
-          latitude,
-          longitude,
-          location_accuracy_m,
-          location_captured_at,
           ''',
     )
         .eq('caregiver_id', caregiverId)
         .order('created_at', ascending: false)
         .limit(100);
 
-    return List<Map<String, dynamic>>.from(data);
+    final rows = List<Map<String, dynamic>>.from(data);
+
+    debugPrint('🔍 Loaded ${rows.length} caretaker SOS alert(s)');
+
+    for (final row in rows) {
+      debugPrint(
+        '🗺️ Alert ${row['id']}: '
+            'patient=${row['patient_name']}, '
+            'lat=${row['latitude']}, '
+            'lng=${row['longitude']}, '
+            'status=${row['status']}',
+      );
+    }
+
+    return rows;
   }
+
+  // ══════════════════════════════════════════════════════════════
+  // REALTIME / WEBSOCKET SUBSCRIPTION
+  // ══════════════════════════════════════════════════════════════
 
   RealtimeChannel subscribeToCaretakerAlerts(
       void Function(PostgresChangePayload payload) onChanged,
@@ -293,6 +321,10 @@ class SosService {
     return channel;
   }
 
+  // ══════════════════════════════════════════════════════════════
+  // ACKNOWLEDGE ALERT
+  // ══════════════════════════════════════════════════════════════
+
   Future<void> acknowledgeAlert(String alertId) async {
     final caregiverId = _requireCurrentUserId();
     final now = DateTime.now().toUtc().toIso8601String();
@@ -316,6 +348,10 @@ class SosService {
     }
   }
 
+  // ══════════════════════════════════════════════════════════════
+  // RESOLVE ALERT
+  // ══════════════════════════════════════════════════════════════
+
   Future<void> resolveAlert(String alertId) async {
     final caregiverId = _requireCurrentUserId();
     final now = DateTime.now().toUtc().toIso8601String();
@@ -329,7 +365,13 @@ class SosService {
     })
         .eq('id', alertId)
         .eq('caregiver_id', caregiverId)
-        .inFilter('status', ['sent', 'acknowledged'])
+        .inFilter(
+      'status',
+      const [
+        'sent',
+        'acknowledged',
+      ],
+    )
         .select('id');
 
     if ((updated as List).isEmpty) {
@@ -338,6 +380,10 @@ class SosService {
       );
     }
   }
+
+  // ══════════════════════════════════════════════════════════════
+  // PATIENT CANCELLATION
+  // ══════════════════════════════════════════════════════════════
 
   Future<void> cancelPatientAlert(String alertId) async {
     final patientId = _requireCurrentUserId();

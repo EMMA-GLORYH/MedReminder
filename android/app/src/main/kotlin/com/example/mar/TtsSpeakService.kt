@@ -458,6 +458,11 @@ class TtsSpeakService : Service(), TextToSpeech.OnInitListener {
         var resourceId = getRawResourceId(
             requestedResourceName
         )
+        Log.d(
+            LOG_TAG,
+            "Sound lookup: resource='$requestedResourceName', " +
+                    "id=$resourceId, package=$packageName"
+        )
 
         if (resourceId == 0) {
             Log.e(

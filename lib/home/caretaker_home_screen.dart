@@ -13,6 +13,7 @@ import 'package:mar/home/caretaker/patients_tab.dart';
 import 'package:mar/models/profile.dart';
 import 'package:mar/services/auth_service.dart';
 import 'package:mar/services/care_relationship_service.dart';
+import 'package:mar/services/sos_realtime_service.dart';
 import 'package:mar/services/sos_service.dart';
 import 'package:mar/services/sos_speech_service.dart';
 import 'package:mar/theme/app_colors.dart';
@@ -48,8 +49,6 @@ class _CaretakerHomeScreenState
 
   Timer? _refreshDebounce;
 
-  /// Prevents one Realtime event from being announced more than once
-  /// during the current app session.
   final Set<String> _announcedSosIds = <String>{};
 
   final List<String> _titles = const [
@@ -62,17 +61,15 @@ class _CaretakerHomeScreenState
   @override
   void initState() {
     super.initState();
-
     WidgetsBinding.instance.addObserver(this);
-
     _loadSummary();
     _subscribeToRealtime();
+    _startNativeSosMonitor();
   }
 
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
-
     _refreshDebounce?.cancel();
 
     final relationshipChannel = _relationshipChannel;
@@ -97,16 +94,28 @@ class _CaretakerHomeScreenState
   }
 
   @override
-  void didChangeAppLifecycleState(
-      AppLifecycleState state,
-      ) {
+  void didChangeAppLifecycleState(AppLifecycleState state) {
     if (state == AppLifecycleState.resumed) {
       _loadSummary(silent: true);
+      _startNativeSosMonitor(); // pushes a fresh token if it changed
+    }
+  }
+
+  void _startNativeSosMonitor() {
+    final id = AuthService.instance.currentUser?.id;
+    if (id != null && id.isNotEmpty) {
+      SosRealtimeNativeService.instance.startForCurrentCaretaker(caregiverId: id);
     }
   }
 
   // ══════════════════════════════════════════════════════════════
-  // REALTIME / WEBSOCKET SUBSCRIPTIONS
+  // REALTIME SUBSCRIPTIONS (Flutter UI layer fallback)
+  //
+  // This Flutter subscription updates badge counts and shows
+  // snackbars when the app is visible.
+  //
+  // The native SosRealtimeService handles the actual alarm when the
+  // app is backgrounded or the phone is locked.
   // ══════════════════════════════════════════════════════════════
 
   void _subscribeToRealtime() {
@@ -118,7 +127,8 @@ class _CaretakerHomeScreenState
           });
     } catch (error, stack) {
       debugPrint(
-        '❌ Care relationship Realtime subscription failed: $error',
+        '❌ Care relationship Realtime subscription failed: '
+            '$error',
       );
       debugPrint('$stack');
     }
@@ -136,45 +146,24 @@ class _CaretakerHomeScreenState
     }
   }
 
-  void _handleSosRealtimeChange(
-      PostgresChangePayload payload,
-      ) {
+  void _handleSosRealtimeChange(PostgresChangePayload payload) {
     if (!mounted) return;
 
+    // The native SosRealtimeService plays the alarm + caretaker_sos.mp3.
+    // Here we only refresh the UI (badge / list).
     if (payload.eventType == PostgresChangeEvent.insert) {
-      final record = Map<String, dynamic>.from(
-        payload.newRecord,
-      );
-
+      final record = Map<String, dynamic>.from(payload.newRecord);
       final status = record['status']?.toString() ?? 'sent';
-      final alertId = record['id']?.toString();
+      if (status == 'sent') {
+        final name = (record['patient_name']?.toString() ?? 'A patient').trim();
+        AppSnackbar.error(context, 'URGENT: ${name.isEmpty ? 'A patient' : name} sent an SOS');
+      }
+    }
 
-      if (status == 'sent' &&
-          alertId != null &&
-          alertId.isNotEmpty &&
-          _announcedSosIds.add(alertId)) {
-        final patientName =
-        record['patient_name']?.toString().trim();
-
-        final safePatientName =
-        patientName != null && patientName.isNotEmpty
-            ? patientName
-            : 'A patient';
-
-        debugPrint(
-          '🆘 New SOS received from $safePatientName',
-        );
-
-        unawaited(
-          SosSpeechService.instance.announceEmergency(
-            patientName: safePatientName,
-          ),
-        );
-
-        AppSnackbar.error(
-          context,
-          'URGENT: $safePatientName sent an SOS',
-        );
+    if (payload.eventType == PostgresChangeEvent.update) {
+      final status = payload.newRecord['status']?.toString();
+      if (status == 'resolved' || status == 'cancelled') {
+        // Native stops itself when a new alert supersedes; nothing to do here.
       }
     }
 
@@ -183,13 +172,10 @@ class _CaretakerHomeScreenState
 
   void _queueSummaryRefresh() {
     _refreshDebounce?.cancel();
-
     _refreshDebounce = Timer(
       const Duration(milliseconds: 350),
           () {
-        if (mounted) {
-          _loadSummary(silent: true);
-        }
+        if (mounted) _loadSummary(silent: true);
       },
     );
   }
@@ -209,14 +195,10 @@ class _CaretakerHomeScreenState
           .from('sos_alerts')
           .select('id')
           .eq('caregiver_id', caregiverId)
-          .inFilter(
-        'status',
-        const [
-          'sent',
-          'acknowledged',
-        ],
-      )
-          .count(CountOption.exact);
+          .inFilter('status', const [
+        'sent',
+        'acknowledged',
+      ]).count(CountOption.exact);
 
       return response.count;
     } catch (error, stack) {
@@ -224,7 +206,6 @@ class _CaretakerHomeScreenState
         '❌ Failed to count open SOS alerts: $error',
       );
       debugPrint('$stack');
-
       return _openAlertCount;
     }
   }
@@ -267,13 +248,6 @@ class _CaretakerHomeScreenState
         _openAlertCount = openAlertCount;
         _isLoadingSummary = false;
       });
-
-      debugPrint(
-        '✅ Caretaker summary: '
-            'patients=$_patientCount, '
-            'alerts=$_openAlertCount, '
-            'invites=$_pendingInviteCount',
-      );
     } catch (error, stack) {
       debugPrint(
         '❌ Failed to load caretaker summary: $error',
@@ -288,10 +262,7 @@ class _CaretakerHomeScreenState
 
       if (_refreshQueued && mounted) {
         _refreshQueued = false;
-
-        unawaited(
-          _loadSummary(silent: true),
-        );
+        unawaited(_loadSummary(silent: true));
       }
     }
   }
@@ -332,7 +303,13 @@ class _CaretakerHomeScreenState
     if (confirmed != true || !mounted) return;
 
     try {
+      // ✅ Stop the SOS alarm sound if it is currently playing.
       await SosSpeechService.instance.stop();
+
+      // ✅ NEW: Stop the native background WebSocket service so
+      // SOS alerts are no longer received after logout.
+      await SosRealtimeNativeService.instance.stop();
+
       await AuthService.instance.signOut();
 
       if (!mounted) return;
@@ -347,7 +324,9 @@ class _CaretakerHomeScreenState
             (route) => false,
       );
     } catch (error, stack) {
-      debugPrint('❌ Caretaker logout failed: $error');
+      debugPrint(
+        '❌ Caretaker logout failed: $error',
+      );
       debugPrint('$stack');
 
       if (mounted) {
@@ -395,7 +374,7 @@ class _CaretakerHomeScreenState
             ),
           IconButton(
             icon: const Icon(
-              Icons.logout_rounded,
+              Icons.power_settings_new_rounded,
               color: AppColors.secondary,
             ),
             onPressed: _handleLogout,
@@ -404,32 +383,30 @@ class _CaretakerHomeScreenState
         ],
       ),
 
-      body: IndexedStack(
-        index: _selectedIndex,
+      body: Column(
         children: [
-          // Overview hero is stacked immediately under the AppBar.
-          Column(
-            children: [
-              _CaretakerHero(
-                caretakerName:
-                _profile?.fullName ?? 'Caretaker',
-                patientCount: _patientCount,
-                openAlertCount: _openAlertCount,
-                pendingInviteCount: _pendingInviteCount,
-                isLoading: _isLoadingSummary,
-                onPatients: () => _selectTab(1),
-                onAlerts: () => _selectTab(2),
-                onRefresh: () => _loadSummary(),
-              ),
-              const Expanded(
-                child: CaretakerDashboardTab(),
-              ),
-            ],
+          _CaretakerHero(
+            caretakerName:
+            _profile?.fullName ?? 'Caretaker',
+            patientCount: _patientCount,
+            openAlertCount: _openAlertCount,
+            pendingInviteCount: _pendingInviteCount,
+            isLoading: _isLoadingSummary,
+            onPatients: () => _selectTab(1),
+            onAlerts: () => _selectTab(2),
+            onRefresh: () => _loadSummary(),
           ),
-
-          const PatientsTab(),
-          const AlertsTab(),
-          const CaretakerProfileTab(),
+          Expanded(
+            child: IndexedStack(
+              index: _selectedIndex,
+              children: const [
+                CaretakerDashboardTab(),
+                PatientsTab(),
+                AlertsTab(),
+                CaretakerProfileTab(),
+              ],
+            ),
+          ),
         ],
       ),
 
@@ -437,20 +414,17 @@ class _CaretakerHomeScreenState
         selectedIndex: _selectedIndex,
         onDestinationSelected: _selectTab,
         backgroundColor: AppColors.surface,
-        indicatorColor:
-        AppColors.primary.withValues(alpha: 0.20),
+        indicatorColor: AppColors.primary
+            .withValues(alpha: 0.20),
         destinations: [
           const NavigationDestination(
-            icon: Icon(
-              Icons.dashboard_outlined,
-            ),
+            icon: Icon(Icons.dashboard_outlined),
             selectedIcon: Icon(
               Icons.dashboard_rounded,
               color: AppColors.secondary,
             ),
             label: 'Home',
           ),
-
           NavigationDestination(
             icon: Badge(
               isLabelVisible: _patientCount > 0,
@@ -469,7 +443,6 @@ class _CaretakerHomeScreenState
             ),
             label: 'Patients',
           ),
-
           NavigationDestination(
             icon: Badge(
               isLabelVisible: _openAlertCount > 0,
@@ -490,11 +463,8 @@ class _CaretakerHomeScreenState
             ),
             label: 'Alerts',
           ),
-
           const NavigationDestination(
-            icon: Icon(
-              Icons.person_outline,
-            ),
+            icon: Icon(Icons.person_outline),
             selectedIcon: Icon(
               Icons.person_rounded,
               color: AppColors.secondary,
@@ -517,7 +487,6 @@ class _CaretakerHero extends StatelessWidget {
   final int openAlertCount;
   final int pendingInviteCount;
   final bool isLoading;
-
   final VoidCallback onPatients;
   final VoidCallback onAlerts;
   final VoidCallback onRefresh;
@@ -576,9 +545,9 @@ class _CaretakerHero extends StatelessWidget {
                 ),
               ),
             ),
-
             Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
+              crossAxisAlignment:
+              CrossAxisAlignment.start,
               children: [
                 Row(
                   children: [
@@ -618,21 +587,17 @@ class _CaretakerHero extends StatelessWidget {
                     ),
                   ],
                 ),
-
                 const SizedBox(height: 6),
-
                 Text(
                   'Monitor your patients and respond quickly '
                       'when urgent assistance is needed.',
                   style: AppTextStyles.bodySmall.copyWith(
-                    color:
-                    Colors.white.withValues(alpha: 0.75),
+                    color: Colors.white
+                        .withValues(alpha: 0.75),
                     height: 1.4,
                   ),
                 ),
-
                 const SizedBox(height: 18),
-
                 Row(
                   children: [
                     Expanded(
@@ -698,8 +663,7 @@ class _HeroStat extends StatelessWidget {
       child: Container(
         padding: const EdgeInsets.all(12),
         decoration: BoxDecoration(
-          color:
-          Colors.white.withValues(alpha: 0.12),
+          color: Colors.white.withValues(alpha: 0.12),
           borderRadius: BorderRadius.circular(16),
           border: Border.all(
             color:
@@ -708,11 +672,7 @@ class _HeroStat extends StatelessWidget {
         ),
         child: Column(
           children: [
-            Icon(
-              icon,
-              color: color,
-              size: 20,
-            ),
+            Icon(icon, color: color, size: 20),
             const SizedBox(height: 6),
             Text(
               value,
@@ -723,9 +683,10 @@ class _HeroStat extends StatelessWidget {
             ),
             Text(
               label,
-              style: AppTextStyles.labelSmall.copyWith(
-                color:
-                Colors.white.withValues(alpha: 0.74),
+              style:
+              AppTextStyles.labelSmall.copyWith(
+                color: Colors.white
+                    .withValues(alpha: 0.74),
                 fontSize: 9,
               ),
               textAlign: TextAlign.center,
@@ -744,8 +705,7 @@ class _HeroDecorationPainter extends CustomPainter {
   @override
   void paint(Canvas canvas, Size size) {
     final softPaint = Paint()
-      ..color =
-      Colors.white.withValues(alpha: 0.06)
+      ..color = Colors.white.withValues(alpha: 0.06)
       ..style = PaintingStyle.fill;
 
     final accentPaint = Paint()
@@ -760,7 +720,10 @@ class _HeroDecorationPainter extends CustomPainter {
     );
 
     canvas.drawCircle(
-      Offset(size.width * 0.68, size.height - 10),
+      Offset(
+        size.width * 0.68,
+        size.height - 10,
+      ),
       45,
       accentPaint,
     );
@@ -775,7 +738,6 @@ class _HeroDecorationPainter extends CustomPainter {
   @override
   bool shouldRepaint(
       covariant _HeroDecorationPainter oldDelegate,
-      ) {
-    return false;
-  }
+      ) =>
+      false;
 }

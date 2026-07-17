@@ -14,13 +14,7 @@ import '../medication_reminder_scanner_screen.dart';
 class TodaysSchedule extends StatefulWidget {
   final VoidCallback onAddPressed;
   final VoidCallback? onViewAllPressed;
-
-  /// Kept for compatibility with existing calls.
-  ///
-  /// All remaining doses are displayed in the horizontal carousel.
   final int maxDoses;
-
-  /// Fires whenever a dose is marked taken so dashboard/stat cards can update.
   final void Function(TodayDose dose)? onDoseTaken;
 
   const TodaysSchedule({
@@ -32,29 +26,24 @@ class TodaysSchedule extends StatefulWidget {
   });
 
   @override
-  State<TodaysSchedule> createState() => TodaysScheduleState();
+  State<TodaysSchedule> createState() =>
+      TodaysScheduleState();
 }
 
 class TodaysScheduleState extends State<TodaysSchedule> {
   final Set<String> _loggedKeys = {};
-
   late final PageController _pageController;
 
   List<TodayDose> _allDoses = [];
 
   bool _isLoading = true;
   String? _error;
-
   int _currentDoseIndex = 0;
 
   @override
   void initState() {
     super.initState();
-
-    _pageController = PageController(
-      viewportFraction: 0.88,
-    );
-
+    _pageController = PageController(viewportFraction: 0.88);
     load();
   }
 
@@ -63,6 +52,10 @@ class TodaysScheduleState extends State<TodaysSchedule> {
     _pageController.dispose();
     super.dispose();
   }
+
+  // ══════════════════════════════════════════════════════════════
+  // LOAD FROM DATABASE
+  // ══════════════════════════════════════════════════════════════
 
   Future<void> load() async {
     if (mounted) {
@@ -84,34 +77,26 @@ class TodaysScheduleState extends State<TodaysSchedule> {
       final loggedKeys = results[1] as Set<String>;
 
       doses.sort(
-            (a, b) => a.scheduledTime.compareTo(b.scheduledTime),
+            (a, b) =>
+            a.scheduledTime.compareTo(b.scheduledTime),
       );
 
       final remainingCount = doses
-          .where((dose) => !loggedKeys.contains(_doseKey(dose)))
+          .where((d) => !loggedKeys.contains(_doseKey(d)))
           .length;
 
       if (!mounted) return;
 
       setState(() {
         _allDoses = doses;
-
         _loggedKeys
           ..clear()
           ..addAll(loggedKeys);
-
         _normalizeCurrentIndex(remainingCount);
         _isLoading = false;
       });
 
       _jumpToCurrentPage();
-
-      debugPrint(
-        '✅ TodaysSchedule loaded ${_allDoses.length} doses',
-      );
-      debugPrint(
-        '✅ TodaysSchedule loaded ${_loggedKeys.length} logged keys',
-      );
     } catch (e, st) {
       debugPrint('❌ TodaysSchedule.load() failed: $e');
       debugPrint('$st');
@@ -125,6 +110,74 @@ class TodaysScheduleState extends State<TodaysSchedule> {
     }
   }
 
+  // ══════════════════════════════════════════════════════════════
+  // OPTIMISTIC DOSE MANAGEMENT
+  // ══════════════════════════════════════════════════════════════
+
+  /// Immediately adds doses to the UI with `isPending = true`.
+  /// Called right after the user taps Save, before the DB write.
+  void addOptimisticDoses(List<TodayDose> doses) {
+    if (!mounted) return;
+
+    setState(() {
+      // Remove any previous optimistic doses for the same
+      // medication so we don't duplicate.
+      _allDoses.removeWhere(
+            (existing) =>
+        existing.isPending &&
+            doses.any(
+                  (newDose) =>
+              newDose.medicationId ==
+                  existing.medicationId,
+            ),
+      );
+
+      _allDoses.addAll(doses);
+
+      _allDoses.sort(
+            (a, b) =>
+            a.scheduledTime.compareTo(b.scheduledTime),
+      );
+
+      _normalizeCurrentIndex(
+        _displayDoses.length,
+      );
+    });
+
+    _jumpToCurrentPage();
+  }
+
+  /// Replaces optimistic doses with real data from the database
+  /// after the background save completes.
+  void confirmOptimisticDoses() {
+    // Reload from database to get the real schedule IDs and data.
+    load();
+  }
+
+  /// Removes optimistic doses if the background save fails.
+  void removeOptimisticDoses(
+      String medicationId,
+      String errorMessage,
+      ) {
+    if (!mounted) return;
+
+    setState(() {
+      _allDoses.removeWhere(
+            (dose) =>
+        dose.isPending &&
+            dose.medicationId == medicationId,
+      );
+
+      _normalizeCurrentIndex(_displayDoses.length);
+    });
+
+    AppSnackbar.error(context, errorMessage);
+  }
+
+  // ══════════════════════════════════════════════════════════════
+  // HELPERS
+  // ══════════════════════════════════════════════════════════════
+
   void _normalizeCurrentIndex(int itemCount) {
     if (itemCount <= 0) {
       _currentDoseIndex = 0;
@@ -135,9 +188,7 @@ class TodaysScheduleState extends State<TodaysSchedule> {
       _currentDoseIndex = itemCount - 1;
     }
 
-    if (_currentDoseIndex < 0) {
-      _currentDoseIndex = 0;
-    }
+    if (_currentDoseIndex < 0) _currentDoseIndex = 0;
   }
 
   void _jumpToCurrentPage() {
@@ -146,15 +197,12 @@ class TodaysScheduleState extends State<TodaysSchedule> {
 
       try {
         _pageController.jumpToPage(_currentDoseIndex);
-      } catch (_) {
-        // The PageView may have been removed after the final dose was taken.
-      }
+      } catch (_) {}
     });
   }
 
   String _doseKey(TodayDose dose) {
     final time = dose.scheduledTime;
-
     return '${dose.scheduleId}|'
         '${time.year}-'
         '${time.month.toString().padLeft(2, '0')}-'
@@ -163,29 +211,32 @@ class TodaysScheduleState extends State<TodaysSchedule> {
         '${time.minute.toString().padLeft(2, '0')}';
   }
 
-  bool _isDoseTaken(TodayDose dose) {
-    return _loggedKeys.contains(_doseKey(dose));
-  }
+  bool _isDoseTaken(TodayDose dose) =>
+      _loggedKeys.contains(_doseKey(dose));
 
-  /// A dose becomes available at its exact scheduled local time.
-  bool _isDoseDue(TodayDose dose) {
-    return !DateTime.now().isBefore(dose.scheduledTime);
-  }
+  bool _isDoseDue(TodayDose dose) =>
+      !DateTime.now().isBefore(dose.scheduledTime);
 
   String _formatTime(DateTime dateTime) {
     final hour = dateTime.hour;
-    final minute = dateTime.minute.toString().padLeft(2, '0');
+    final minute =
+    dateTime.minute.toString().padLeft(2, '0');
     final period = hour >= 12 ? 'PM' : 'AM';
-    final displayHour = hour == 0 ? 12 : (hour > 12 ? hour - 12 : hour);
-
+    final displayHour =
+    hour == 0 ? 12 : (hour > 12 ? hour - 12 : hour);
     return '$displayHour:$minute $period';
   }
 
-  /// A due dose opens the reminder screen.
-  ///
-  /// The reminder screen owns the mark-as-taken operation. A future dose
-  /// remains locked until its scheduled local time.
   Future<void> _openDose(TodayDose dose) async {
+    // Pending doses cannot be confirmed yet.
+    if (dose.isPending) {
+      AppSnackbar.error(
+        context,
+        'This dose is still being saved. Please wait…',
+      );
+      return;
+    }
+
     final localization = AppLocalizations.of(context);
 
     if (!_isDoseDue(dose)) {
@@ -193,9 +244,7 @@ class TodaysScheduleState extends State<TodaysSchedule> {
         context,
         localization.t(
           'notDueSnackbar',
-          {
-            'time': _formatTime(dose.scheduledTime),
-          },
+          {'time': _formatTime(dose.scheduledTime)},
         ),
       );
       return;
@@ -204,9 +253,8 @@ class TodaysScheduleState extends State<TodaysSchedule> {
     final result = await Navigator.of(context).push<bool>(
       MaterialPageRoute(
         fullscreenDialog: true,
-        builder: (_) => MedicationReminderScannerScreen(
-          dose: dose,
-        ),
+        builder: (_) =>
+            MedicationReminderScannerScreen(dose: dose),
       ),
     );
 
@@ -214,36 +262,37 @@ class TodaysScheduleState extends State<TodaysSchedule> {
 
     setState(() {
       _loggedKeys.add(_doseKey(dose));
-
-      final remainingCount = _allDoses
-          .where((item) => !_isDoseTaken(item))
-          .length;
-
-      _normalizeCurrentIndex(remainingCount);
+      _normalizeCurrentIndex(
+        _allDoses
+            .where((item) => !_isDoseTaken(item))
+            .length,
+      );
     });
 
     _jumpToCurrentPage();
     widget.onDoseTaken?.call(dose);
   }
 
-  /// All untaken doses, sorted from the earliest to the latest.
   List<TodayDose> get _displayDoses {
     final untaken = _allDoses
         .where((dose) => !_isDoseTaken(dose))
         .toList();
 
     untaken.sort(
-          (a, b) => a.scheduledTime.compareTo(b.scheduledTime),
+          (a, b) =>
+          a.scheduledTime.compareTo(b.scheduledTime),
     );
 
     return untaken;
   }
 
+  // ══════════════════════════════════════════════════════════════
+  // BUILD
+  // ══════════════════════════════════════════════════════════════
+
   @override
   Widget build(BuildContext context) {
-    if (_isLoading) {
-      return const _ScheduleSkeleton();
-    }
+    if (_isLoading) return const _ScheduleSkeleton();
 
     if (_error != null) {
       return _ErrorState(
@@ -260,10 +309,9 @@ class TodaysScheduleState extends State<TodaysSchedule> {
 
     final displayDoses = _displayDoses;
 
-    if (displayDoses.isEmpty || _allDoses.every(_isDoseTaken)) {
-      return _AllDoneCard(
-        count: _allDoses.length,
-      );
+    if (displayDoses.isEmpty ||
+        _allDoses.every(_isDoseTaken)) {
+      return _AllDoneCard(count: _allDoses.length);
     }
 
     return Column(
@@ -277,10 +325,7 @@ class TodaysScheduleState extends State<TodaysSchedule> {
             padEnds: false,
             onPageChanged: (index) {
               if (!mounted) return;
-
-              setState(() {
-                _currentDoseIndex = index;
-              });
+              setState(() => _currentDoseIndex = index);
             },
             itemBuilder: (context, index) {
               final dose = displayDoses[index];
@@ -299,7 +344,6 @@ class TodaysScheduleState extends State<TodaysSchedule> {
             },
           ),
         ),
-
         if (displayDoses.length > 1) ...[
           const SizedBox(height: 14),
           _CarouselIndicator(
@@ -308,7 +352,8 @@ class TodaysScheduleState extends State<TodaysSchedule> {
           ),
           const SizedBox(height: 7),
           Text(
-            '${_currentDoseIndex + 1} of ${displayDoses.length}',
+            '${_currentDoseIndex + 1} of '
+                '${displayDoses.length}',
             style: AppTextStyles.labelSmall.copyWith(
               color: AppColors.textSecondary,
               fontWeight: FontWeight.w600,
@@ -322,7 +367,7 @@ class TodaysScheduleState extends State<TodaysSchedule> {
 }
 
 // ══════════════════════════════════════════════════════════════
-// HORIZONTAL PRODUCT-STYLE DOSE CARD
+// DOSE CARD
 // ══════════════════════════════════════════════════════════════
 
 class _DoseTile extends StatelessWidget {
@@ -337,15 +382,13 @@ class _DoseTile extends StatelessWidget {
   });
 
   bool get _hasImage {
-    final imageUrl = dose.pillImageUrl;
-    return imageUrl != null && imageUrl.trim().isNotEmpty;
+    final url = dose.pillImageUrl;
+    return url != null && url.trim().isNotEmpty;
   }
 
   bool get _hasDifferentGenericName {
-    final medicationName = dose.medicationName.trim().toLowerCase();
-    final genericName = dose.genericName.trim().toLowerCase();
-
-    return genericName.isNotEmpty && medicationName != genericName;
+    return dose.genericName.trim().toLowerCase() !=
+        dose.medicationName.trim().toLowerCase();
   }
 
   Color get _medColor {
@@ -379,256 +422,340 @@ class _DoseTile extends StatelessWidget {
         return Icons.medication_liquid_rounded;
       case 'units':
         return Icons.vaccines_rounded;
-      case 'tablets':
-        return Icons.medication_rounded;
       default:
         return Icons.medication_rounded;
     }
   }
 
   Color get _statusColor {
+    if (dose.isPending) return AppColors.warning;
     if (dose.isPast) return AppColors.error;
     if (dose.isDueSoon) return AppColors.warning;
     return AppColors.primary;
   }
 
-  String _statusLabel(AppLocalizations localization) {
-    if (dose.isPast) return localization.t('overdue');
-    if (dose.isDueSoon) return localization.t('dueSoon');
-    return localization.t('upcoming');
+  String _statusLabel(AppLocalizations loc) {
+    if (dose.isPending) return 'Saving…';
+    if (dose.isPast) return loc.t('overdue');
+    if (dose.isDueSoon) return loc.t('dueSoon');
+    return loc.t('upcoming');
   }
 
   String get _timeText {
     final hour = dose.scheduledTime.hour;
-    final minute = dose.scheduledTime.minute.toString().padLeft(2, '0');
+    final minute = dose.scheduledTime.minute
+        .toString()
+        .padLeft(2, '0');
     final period = hour >= 12 ? 'PM' : 'AM';
-    final displayHour = hour == 0 ? 12 : (hour > 12 ? hour - 12 : hour);
-
+    final displayHour =
+    hour == 0 ? 12 : (hour > 12 ? hour - 12 : hour);
     return '$displayHour:$minute $period';
   }
 
   @override
   Widget build(BuildContext context) {
-    final localization = AppLocalizations.of(context);
+    final loc = AppLocalizations.of(context);
 
-    return Material(
-      color: AppColors.surface,
-      elevation: isDue ? 3 : 1,
-      shadowColor: Colors.black.withValues(alpha: 0.10),
-      borderRadius: BorderRadius.circular(18),
-      clipBehavior: Clip.antiAlias,
-      child: InkWell(
-        onTap: onTap,
-        child: Container(
-          decoration: BoxDecoration(
-            borderRadius: BorderRadius.circular(18),
-            border: Border.all(
-              color: dose.isPast
-                  ? AppColors.error.withValues(alpha: 0.35)
-                  : dose.isDueSoon
-                  ? AppColors.warning.withValues(alpha: 0.45)
-                  : AppColors.border,
+    return Opacity(
+      // Pending doses are slightly faded to indicate they are saving.
+      opacity: dose.isPending ? 0.72 : 1.0,
+      child: Material(
+        color: AppColors.surface,
+        elevation: isDue && !dose.isPending ? 3 : 1,
+        shadowColor: Colors.black.withValues(alpha: 0.10),
+        borderRadius: BorderRadius.circular(18),
+        clipBehavior: Clip.antiAlias,
+        child: InkWell(
+          onTap: onTap,
+          child: Container(
+            decoration: BoxDecoration(
+              borderRadius: BorderRadius.circular(18),
+              border: Border.all(
+                color: dose.isPending
+                    ? AppColors.warning
+                    .withValues(alpha: 0.50)
+                    : dose.isPast
+                    ? AppColors.error
+                    .withValues(alpha: 0.35)
+                    : dose.isDueSoon
+                    ? AppColors.warning
+                    .withValues(alpha: 0.45)
+                    : AppColors.border,
+              ),
             ),
-          ),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.stretch,
-            children: [
-              // ────────────────────────────────────────────────
-              // LARGE MEDICINE IMAGE
-              // ────────────────────────────────────────────────
-              SizedBox(
-                height: 220,
-                child: Stack(
-                  fit: StackFit.expand,
-                  children: [
-                    _DoseImage(
-                      imageUrl: dose.pillImageUrl,
-                      fallbackColor: _medColor,
-                      fallbackIcon: _fallbackIcon,
-                    ),
+            child: Column(
+              crossAxisAlignment:
+              CrossAxisAlignment.stretch,
+              children: [
+                // ────────────────────────────────────
+                // MEDICINE IMAGE
+                // ────────────────────────────────────
+                SizedBox(
+                  height: 220,
+                  child: Stack(
+                    fit: StackFit.expand,
+                    children: [
+                      _DoseImage(
+                        imageUrl: dose.pillImageUrl,
+                        fallbackColor: _medColor,
+                        fallbackIcon: _fallbackIcon,
+                      ),
 
-                    // Subtle gradient gives the image more depth.
-                    Positioned.fill(
-                      child: IgnorePointer(
-                        child: DecoratedBox(
-                          decoration: BoxDecoration(
-                            gradient: LinearGradient(
-                              begin: Alignment.topCenter,
-                              end: Alignment.bottomCenter,
-                              colors: [
-                                Colors.black.withValues(alpha: 0.03),
-                                Colors.transparent,
-                                Colors.black.withValues(alpha: 0.22),
-                              ],
+                      // Gradient depth
+                      Positioned.fill(
+                        child: IgnorePointer(
+                          child: DecoratedBox(
+                            decoration: BoxDecoration(
+                              gradient: LinearGradient(
+                                begin:
+                                Alignment.topCenter,
+                                end: Alignment
+                                    .bottomCenter,
+                                colors: [
+                                  Colors.black
+                                      .withValues(
+                                      alpha: 0.03),
+                                  Colors.transparent,
+                                  Colors.black
+                                      .withValues(
+                                      alpha: 0.22),
+                                ],
+                              ),
                             ),
                           ),
                         ),
                       ),
-                    ),
 
-                    Positioned(
-                      top: 12,
-                      left: 12,
-                      child: _DoseStatusBadge(
-                        label: _statusLabel(localization),
-                        color: _statusColor,
+                      // Status badge (top-left)
+                      Positioned(
+                        top: 12,
+                        left: 12,
+                        child: dose.isPending
+                            ? _PendingBadge()
+                            : _DoseStatusBadge(
+                          label:
+                          _statusLabel(loc),
+                          color: _statusColor,
+                        ),
                       ),
-                    ),
 
-                    Positioned(
-                      top: 12,
-                      right: 12,
-                      child: Container(
-                        width: 34,
-                        height: 34,
-                        decoration: BoxDecoration(
-                          color: Colors.white.withValues(alpha: 0.90),
-                          shape: BoxShape.circle,
-                          boxShadow: [
-                            BoxShadow(
-                              color: Colors.black.withValues(alpha: 0.10),
-                              blurRadius: 6,
-                              offset: const Offset(0, 2),
+                      // Image type icon (top-right)
+                      Positioned(
+                        top: 12,
+                        right: 12,
+                        child: Container(
+                          width: 34,
+                          height: 34,
+                          decoration: BoxDecoration(
+                            color: Colors.white
+                                .withValues(alpha: 0.90),
+                            shape: BoxShape.circle,
+                            boxShadow: [
+                              BoxShadow(
+                                color: Colors.black
+                                    .withValues(
+                                    alpha: 0.10),
+                                blurRadius: 6,
+                                offset:
+                                const Offset(0, 2),
+                              ),
+                            ],
+                          ),
+                          child: Icon(
+                            _hasImage
+                                ? Icons.image_rounded
+                                : Icons
+                                .medication_rounded,
+                            size: 18,
+                            color: AppColors.secondary,
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+
+                // ────────────────────────────────────
+                // MEDICATION INFO
+                // ────────────────────────────────────
+                Expanded(
+                  child: Padding(
+                    padding: const EdgeInsets.fromLTRB(
+                        16, 14, 16, 6),
+                    child: Column(
+                      crossAxisAlignment:
+                      CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          dose.medicationName,
+                          style: AppTextStyles
+                              .titleMedium
+                              .copyWith(
+                            fontWeight: FontWeight.w800,
+                          ),
+                          maxLines: 2,
+                          overflow: TextOverflow.ellipsis,
+                        ),
+                        if (_hasDifferentGenericName) ...[
+                          const SizedBox(height: 3),
+                          Text(
+                            dose.genericName,
+                            style: AppTextStyles
+                                .bodySmall
+                                .copyWith(
+                              color:
+                              AppColors.textSecondary,
+                            ),
+                            maxLines: 1,
+                            overflow: TextOverflow
+                                .ellipsis,
+                          ),
+                        ],
+                        const Spacer(),
+                        Row(
+                          children: [
+                            Expanded(
+                              child: Text(
+                                dose.dosageDisplay,
+                                style: AppTextStyles
+                                    .titleMedium
+                                    .copyWith(
+                                  color: AppColors
+                                      .secondary,
+                                  fontWeight:
+                                  FontWeight.w800,
+                                ),
+                                maxLines: 1,
+                                overflow: TextOverflow
+                                    .ellipsis,
+                              ),
+                            ),
+                            const SizedBox(width: 8),
+                            const Icon(
+                              Icons.access_time_rounded,
+                              size: 16,
+                              color:
+                              AppColors.textSecondary,
+                            ),
+                            const SizedBox(width: 4),
+                            Text(
+                              _timeText,
+                              style: AppTextStyles
+                                  .bodySmall
+                                  .copyWith(
+                                color: AppColors
+                                    .textSecondary,
+                                fontWeight:
+                                FontWeight.w700,
+                              ),
                             ),
                           ],
                         ),
-                        child: Icon(
-                          _hasImage
-                              ? Icons.image_rounded
-                              : Icons.medication_rounded,
-                          size: 18,
-                          color: AppColors.secondary,
-                        ),
+                      ],
+                    ),
+                  ),
+                ),
+
+                // ────────────────────────────────────
+                // ACTION AREA
+                // ────────────────────────────────────
+                Padding(
+                  padding: const EdgeInsets.fromLTRB(
+                      16, 8, 16, 14),
+                  child: AnimatedContainer(
+                    duration:
+                    const Duration(milliseconds: 300),
+                    height: 42,
+                    padding: const EdgeInsets.symmetric(
+                        horizontal: 12),
+                    decoration: BoxDecoration(
+                      color: dose.isPending
+                          ? AppColors.warning
+                          .withValues(alpha: 0.10)
+                          : isDue
+                          ? AppColors.primary
+                          .withValues(alpha: 0.13)
+                          : AppColors.surfaceVariant,
+                      borderRadius:
+                      BorderRadius.circular(12),
+                      border: Border.all(
+                        color: dose.isPending
+                            ? AppColors.warning
+                            .withValues(alpha: 0.35)
+                            : isDue
+                            ? AppColors.primary
+                            .withValues(
+                            alpha: 0.28)
+                            : AppColors.border,
                       ),
                     ),
-                  ],
-                ),
-              ),
-
-              // ────────────────────────────────────────────────
-              // MEDICATION INFORMATION
-              // ────────────────────────────────────────────────
-              Expanded(
-                child: Padding(
-                  padding: const EdgeInsets.fromLTRB(16, 14, 16, 6),
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Text(
-                        dose.medicationName,
-                        style: AppTextStyles.titleMedium.copyWith(
-                          fontWeight: FontWeight.w800,
-                        ),
-                        maxLines: 2,
-                        overflow: TextOverflow.ellipsis,
-                      ),
-
-                      if (_hasDifferentGenericName) ...[
-                        const SizedBox(height: 3),
-                        Text(
-                          dose.genericName,
-                          style: AppTextStyles.bodySmall.copyWith(
-                            color: AppColors.textSecondary,
-                          ),
-                          maxLines: 1,
-                          overflow: TextOverflow.ellipsis,
-                        ),
-                      ],
-
-                      const Spacer(),
-
-                      Row(
-                        children: [
-                          Expanded(
-                            child: Text(
-                              dose.dosageDisplay,
-                              style: AppTextStyles.titleMedium.copyWith(
-                                color: AppColors.secondary,
-                                fontWeight: FontWeight.w800,
-                              ),
-                              maxLines: 1,
-                              overflow: TextOverflow.ellipsis,
+                    child: Row(
+                      mainAxisAlignment:
+                      MainAxisAlignment.center,
+                      children: [
+                        if (dose.isPending) ...[
+                          SizedBox(
+                            width: 14,
+                            height: 14,
+                            child:
+                            CircularProgressIndicator(
+                              strokeWidth: 2,
+                              color: AppColors.warning,
                             ),
                           ),
                           const SizedBox(width: 8),
-                          const Icon(
-                            Icons.access_time_rounded,
-                            size: 16,
-                            color: AppColors.textSecondary,
-                          ),
-                          const SizedBox(width: 4),
                           Text(
-                            _timeText,
-                            style: AppTextStyles.bodySmall.copyWith(
-                              color: AppColors.textSecondary,
+                            'Saving to your schedule…',
+                            style: AppTextStyles
+                                .bodySmall
+                                .copyWith(
+                              color: AppColors.warning,
                               fontWeight: FontWeight.w700,
                             ),
                           ),
-                        ],
-                      ),
-                    ],
-                  ),
-                ),
-              ),
-
-              // ────────────────────────────────────────────────
-              // DUE/LOCKED ACTION AREA
-              // ────────────────────────────────────────────────
-              Padding(
-                padding: const EdgeInsets.fromLTRB(16, 8, 16, 14),
-                child: Container(
-                  height: 42,
-                  padding: const EdgeInsets.symmetric(horizontal: 12),
-                  decoration: BoxDecoration(
-                    color: isDue
-                        ? AppColors.primary.withValues(alpha: 0.13)
-                        : AppColors.surfaceVariant,
-                    borderRadius: BorderRadius.circular(12),
-                    border: Border.all(
-                      color: isDue
-                          ? AppColors.primary.withValues(alpha: 0.28)
-                          : AppColors.border,
-                    ),
-                  ),
-                  child: Row(
-                    mainAxisAlignment: MainAxisAlignment.center,
-                    children: [
-                      Icon(
-                        isDue
-                            ? Icons.touch_app_rounded
-                            : Icons.lock_clock_rounded,
-                        size: 17,
-                        color: isDue
-                            ? AppColors.primary
-                            : AppColors.textSecondary,
-                      ),
-                      const SizedBox(width: 7),
-                      Flexible(
-                        child: Text(
-                          isDue
-                              ? localization.t('tapToMarkTaken')
-                              : localization.t(
-                            'availableAt',
-                            {
-                              'time': _timeText,
-                            },
-                          ),
-                          style: AppTextStyles.bodySmall.copyWith(
+                        ] else ...[
+                          Icon(
+                            isDue
+                                ? Icons.touch_app_rounded
+                                : Icons
+                                .lock_clock_rounded,
+                            size: 17,
                             color: isDue
                                 ? AppColors.primary
                                 : AppColors.textSecondary,
-                            fontWeight: FontWeight.w700,
                           ),
-                          maxLines: 1,
-                          overflow: TextOverflow.ellipsis,
-                          textAlign: TextAlign.center,
-                        ),
-                      ),
-                    ],
+                          const SizedBox(width: 7),
+                          Flexible(
+                            child: Text(
+                              isDue
+                                  ? loc.t('tapToMarkTaken')
+                                  : loc.t(
+                                'availableAt',
+                                {'time': _timeText},
+                              ),
+                              style: AppTextStyles
+                                  .bodySmall
+                                  .copyWith(
+                                color: isDue
+                                    ? AppColors.primary
+                                    : AppColors
+                                    .textSecondary,
+                                fontWeight:
+                                FontWeight.w700,
+                              ),
+                              maxLines: 1,
+                              overflow:
+                              TextOverflow.ellipsis,
+                              textAlign: TextAlign.center,
+                            ),
+                          ),
+                        ],
+                      ],
+                    ),
                   ),
                 ),
-              ),
-            ],
+              ],
+            ),
           ),
         ),
       ),
@@ -637,7 +764,99 @@ class _DoseTile extends StatelessWidget {
 }
 
 // ══════════════════════════════════════════════════════════════
-// MEDICATION IMAGE
+// PENDING BADGE (animated "Saving…" shimmer)
+// ══════════════════════════════════════════════════════════════
+
+class _PendingBadge extends StatefulWidget {
+  @override
+  State<_PendingBadge> createState() =>
+      _PendingBadgeState();
+}
+
+class _PendingBadgeState extends State<_PendingBadge>
+    with SingleTickerProviderStateMixin {
+  late AnimationController _controller;
+  late Animation<double> _animation;
+
+  @override
+  void initState() {
+    super.initState();
+    _controller = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 900),
+    )..repeat(reverse: true);
+
+    _animation = Tween<double>(
+      begin: 0.5,
+      end: 1.0,
+    ).animate(
+      CurvedAnimation(
+        parent: _controller,
+        curve: Curves.easeInOut,
+      ),
+    );
+  }
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return AnimatedBuilder(
+      animation: _animation,
+      builder: (_, __) {
+        return Container(
+          padding: const EdgeInsets.symmetric(
+            horizontal: 10,
+            vertical: 6,
+          ),
+          decoration: BoxDecoration(
+            color: AppColors.warning.withValues(
+              alpha: 0.85 * _animation.value,
+            ),
+            borderRadius: BorderRadius.circular(10),
+            boxShadow: [
+              BoxShadow(
+                color: Colors.black
+                    .withValues(alpha: 0.15),
+                blurRadius: 6,
+                offset: const Offset(0, 2),
+              ),
+            ],
+          ),
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              SizedBox(
+                width: 10,
+                height: 10,
+                child: CircularProgressIndicator(
+                  strokeWidth: 1.5,
+                  color: Colors.white,
+                ),
+              ),
+              const SizedBox(width: 6),
+              const Text(
+                'Saving…',
+                style: TextStyle(
+                  color: Colors.white,
+                  fontSize: 10,
+                  fontWeight: FontWeight.w800,
+                ),
+              ),
+            ],
+          ),
+        );
+      },
+    );
+  }
+}
+
+// ══════════════════════════════════════════════════════════════
+// MEDICINE IMAGE
 // ══════════════════════════════════════════════════════════════
 
 class _DoseImage extends StatelessWidget {
@@ -651,9 +870,8 @@ class _DoseImage extends StatelessWidget {
     required this.fallbackIcon,
   });
 
-  bool get _hasImage {
-    return imageUrl != null && imageUrl!.trim().isNotEmpty;
-  }
+  bool get _hasImage =>
+      imageUrl != null && imageUrl!.trim().isNotEmpty;
 
   @override
   Widget build(BuildContext context) {
@@ -686,12 +904,10 @@ class _DoseImage extends StatelessWidget {
           ),
         );
       },
-      errorBuilder: (_, __, ___) {
-        return _FallbackDoseImage(
-          color: fallbackColor,
-          icon: fallbackIcon,
-        );
-      },
+      errorBuilder: (_, __, ___) => _FallbackDoseImage(
+        color: fallbackColor,
+        icon: fallbackIcon,
+      ),
     );
   }
 }
@@ -705,11 +921,10 @@ class _FallbackDoseImage extends StatelessWidget {
     required this.icon,
   });
 
-  bool get _isLight {
-    return color == Colors.white ||
-        color == Colors.yellow ||
-        color == const Color(0xFFFFC107);
-  }
+  bool get _isLight =>
+      color == Colors.white ||
+          color == Colors.yellow ||
+          color == const Color(0xFFFFC107);
 
   @override
   Widget build(BuildContext context) {
@@ -729,12 +944,18 @@ class _FallbackDoseImage extends StatelessWidget {
         child: Icon(
           icon,
           size: 76,
-          color: _isLight ? AppColors.secondary : Colors.white,
+          color: _isLight
+              ? AppColors.secondary
+              : Colors.white,
         ),
       ),
     );
   }
 }
+
+// ══════════════════════════════════════════════════════════════
+// STATUS BADGE
+// ══════════════════════════════════════════════════════════════
 
 class _DoseStatusBadge extends StatelessWidget {
   final String label;
@@ -797,26 +1018,25 @@ class _CarouselIndicator extends StatelessWidget {
         child: Row(
           mainAxisSize: MainAxisSize.min,
           mainAxisAlignment: MainAxisAlignment.center,
-          children: List.generate(
-            itemCount,
-                (index) {
-              final selected = index == currentIndex;
+          children: List.generate(itemCount, (index) {
+            final selected = index == currentIndex;
 
-              return AnimatedContainer(
-                duration: const Duration(milliseconds: 220),
-                curve: Curves.easeOut,
-                margin: const EdgeInsets.symmetric(horizontal: 4),
-                width: selected ? 22 : 8,
-                height: 8,
-                decoration: BoxDecoration(
-                  color: selected
-                      ? AppColors.primary
-                      : AppColors.border,
-                  borderRadius: BorderRadius.circular(10),
-                ),
-              );
-            },
-          ),
+            return AnimatedContainer(
+              duration:
+              const Duration(milliseconds: 220),
+              curve: Curves.easeOut,
+              margin:
+              const EdgeInsets.symmetric(horizontal: 4),
+              width: selected ? 22 : 8,
+              height: 8,
+              decoration: BoxDecoration(
+                color: selected
+                    ? AppColors.primary
+                    : AppColors.border,
+                borderRadius: BorderRadius.circular(10),
+              ),
+            );
+          }),
         ),
       ),
     );
@@ -829,21 +1049,17 @@ class _CarouselIndicator extends StatelessWidget {
 
 Color _lighten(Color color, double amount) {
   final hsl = HSLColor.fromColor(color);
-
   return hsl
       .withLightness(
-    (hsl.lightness + amount).clamp(0.0, 1.0),
-  )
+      (hsl.lightness + amount).clamp(0.0, 1.0))
       .toColor();
 }
 
 Color _darken(Color color, double amount) {
   final hsl = HSLColor.fromColor(color);
-
   return hsl
       .withLightness(
-    (hsl.lightness - amount).clamp(0.0, 1.0),
-  )
+      (hsl.lightness - amount).clamp(0.0, 1.0))
       .toColor();
 }
 
@@ -853,14 +1069,11 @@ Color _darken(Color color, double amount) {
 
 class _AllDoneCard extends StatelessWidget {
   final int count;
-
-  const _AllDoneCard({
-    required this.count,
-  });
+  const _AllDoneCard({required this.count});
 
   @override
   Widget build(BuildContext context) {
-    final localization = AppLocalizations.of(context);
+    final loc = AppLocalizations.of(context);
 
     return Container(
       width: double.infinity,
@@ -876,7 +1089,8 @@ class _AllDoneCard extends StatelessWidget {
         ),
         borderRadius: BorderRadius.circular(20),
         border: Border.all(
-          color: AppColors.primary.withValues(alpha: 0.40),
+          color: AppColors.primary
+              .withValues(alpha: 0.40),
         ),
       ),
       child: Column(
@@ -895,17 +1109,12 @@ class _AllDoneCard extends StatelessWidget {
           ),
           const SizedBox(height: 16),
           Text(
-            localization.t('allDoneTitle'),
+            loc.t('allDoneTitle'),
             style: AppTextStyles.titleMedium,
           ),
           const SizedBox(height: 4),
           Text(
-            localization.t(
-              'allDoneBody',
-              {
-                'count': '$count',
-              },
-            ),
+            loc.t('allDoneBody', {'count': '$count'}),
             style: AppTextStyles.bodySmall,
             textAlign: TextAlign.center,
           ),
@@ -921,14 +1130,11 @@ class _AllDoneCard extends StatelessWidget {
 
 class _EmptySchedule extends StatelessWidget {
   final VoidCallback onAddPressed;
-
-  const _EmptySchedule({
-    required this.onAddPressed,
-  });
+  const _EmptySchedule({required this.onAddPressed});
 
   @override
   Widget build(BuildContext context) {
-    final localization = AppLocalizations.of(context);
+    final loc = AppLocalizations.of(context);
 
     return Container(
       width: double.infinity,
@@ -939,9 +1145,7 @@ class _EmptySchedule extends StatelessWidget {
       decoration: BoxDecoration(
         color: AppColors.surface,
         borderRadius: BorderRadius.circular(20),
-        border: Border.all(
-          color: AppColors.border,
-        ),
+        border: Border.all(color: AppColors.border),
       ),
       child: Column(
         children: [
@@ -959,34 +1163,28 @@ class _EmptySchedule extends StatelessWidget {
           ),
           const SizedBox(height: 20),
           Text(
-            localization.t('nothingScheduled'),
+            loc.t('nothingScheduled'),
             style: AppTextStyles.titleMedium,
           ),
           const SizedBox(height: 6),
           Text(
-            localization.t('nothingScheduledBody'),
+            loc.t('nothingScheduledBody'),
             style: AppTextStyles.bodySmall,
             textAlign: TextAlign.center,
           ),
           const SizedBox(height: 20),
           TextButton.icon(
             onPressed: onAddPressed,
-            icon: const Icon(
-              Icons.add_rounded,
-              size: 18,
-            ),
-            label: Text(
-              localization.t('addMedication'),
-            ),
+            icon: const Icon(Icons.add_rounded, size: 18),
+            label: Text(loc.t('addMedication')),
             style: TextButton.styleFrom(
               foregroundColor: AppColors.secondary,
               padding: const EdgeInsets.symmetric(
                 horizontal: 24,
                 vertical: 12,
               ),
-              backgroundColor: AppColors.primary.withValues(
-                alpha: 0.20,
-              ),
+              backgroundColor: AppColors.primary
+                  .withValues(alpha: 0.20),
               shape: RoundedRectangleBorder(
                 borderRadius: BorderRadius.circular(12),
               ),
@@ -1013,7 +1211,7 @@ class _ErrorState extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final localization = AppLocalizations.of(context);
+    final loc = AppLocalizations.of(context);
 
     return Container(
       width: double.infinity,
@@ -1022,7 +1220,8 @@ class _ErrorState extends StatelessWidget {
         color: AppColors.surface,
         borderRadius: BorderRadius.circular(20),
         border: Border.all(
-          color: AppColors.error.withValues(alpha: 0.40),
+          color:
+          AppColors.error.withValues(alpha: 0.40),
         ),
       ),
       child: Column(
@@ -1036,7 +1235,7 @@ class _ErrorState extends StatelessWidget {
           Text(
             message.isNotEmpty
                 ? message
-                : localization.t('couldNotLoadSchedule'),
+                : loc.t('couldNotLoadSchedule'),
             style: AppTextStyles.bodyMedium,
             textAlign: TextAlign.center,
           ),
@@ -1047,9 +1246,7 @@ class _ErrorState extends StatelessWidget {
               Icons.refresh_rounded,
               size: 16,
             ),
-            label: Text(
-              localization.t('retry'),
-            ),
+            label: Text(loc.t('retry')),
           ),
         ],
       ),
@@ -1058,7 +1255,7 @@ class _ErrorState extends StatelessWidget {
 }
 
 // ══════════════════════════════════════════════════════════════
-// LOADING SKELETON
+// SKELETON
 // ══════════════════════════════════════════════════════════════
 
 class _ScheduleSkeleton extends StatelessWidget {
@@ -1068,16 +1265,10 @@ class _ScheduleSkeleton extends StatelessWidget {
   Widget build(BuildContext context) {
     return Column(
       children: [
-        SkeletonBox(
-          height: 400,
-          borderRadius: 18,
-        ),
+        SkeletonBox(height: 400, borderRadius: 18),
         const SizedBox(height: 12),
         SkeletonBox(
-          height: 8,
-          width: 70,
-          borderRadius: 10,
-        ),
+            height: 8, width: 70, borderRadius: 10),
       ],
     );
   }
