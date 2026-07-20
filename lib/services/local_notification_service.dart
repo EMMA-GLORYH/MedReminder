@@ -1,5 +1,3 @@
-// lib/services/local_notification_service.dart
-
 import 'dart:async';
 import 'dart:convert';
 import 'dart:typed_data';
@@ -45,11 +43,9 @@ class LocalNotificationService {
 
   // Versioned channels are used because Android notification-channel properties
   // cannot be changed after creation.
-  static const String _reminderChannelId =
-      'medication_prior_visual_v2';
+  static const String _reminderChannelId = 'medication_prior_visual_v2';
 
-  static const String _urgentChannelId =
-      'medication_due_visual_v2';
+  static const String _urgentChannelId = 'medication_due_visual_v2';
 
   static final Int64List _noVibration = Int64List.fromList(
     const <int>[0],
@@ -62,13 +58,13 @@ class LocalNotificationService {
   static const int _priorNativeAlarmStep = 98;
   static const int _priorNotificationStep = 99;
   static const int _dueNativeAlarmStep = 100;
+  static const int _retryNativeAlarmStep = 101;
 
   static const Duration _priorDuration = Duration(
     minutes: 10,
   );
 
-  static const String _payloadPreferencePrefix =
-      'cached_dose_payload_';
+  static const String _payloadPreferencePrefix = 'cached_dose_payload_';
 
   // ══════════════════════════════════════════════════════════════
   // INITIALIZATION
@@ -86,12 +82,10 @@ class LocalNotificationService {
     _scannerRouteChannel.setMethodCallHandler(
           (MethodCall call) async {
         if (call.method != 'openScanner') {
-          return false;          // <-- fixed
+          return false; // <-- fixed
         }
 
-        final payload = call.arguments is String
-            ? call.arguments as String
-            : null;
+        final payload = call.arguments is String ? call.arguments as String : null;
 
         if (payload == null || payload.trim().isEmpty) {
           return false;
@@ -132,8 +126,7 @@ class LocalNotificationService {
         const AndroidNotificationChannel(
           _urgentChannelId,
           'Medication Due Alerts',
-          description:
-          'Visual notification when a medication dose is due',
+          description: 'Visual notification when a medication dose is due',
           importance: Importance.max,
           playSound: false,
           enableVibration: false,
@@ -148,8 +141,7 @@ class LocalNotificationService {
         const AndroidNotificationChannel(
           _reminderChannelId,
           'Upcoming Medication Reminders',
-          description:
-          'Visual notification ten minutes before a dose',
+          description: 'Visual notification ten minutes before a dose',
           importance: Importance.high,
           playSound: false,
           enableVibration: false,
@@ -182,8 +174,7 @@ class LocalNotificationService {
         'getInitialScannerPayload',
       );
 
-      if (initialPayload == null ||
-          initialPayload.trim().isEmpty) {
+      if (initialPayload == null || initialPayload.trim().isEmpty) {
         return;
       }
 
@@ -206,8 +197,7 @@ class LocalNotificationService {
 
   Future<void> _processNotificationLaunchDetails() async {
     try {
-      final launchDetails =
-      await _plugin.getNotificationAppLaunchDetails();
+      final launchDetails = await _plugin.getNotificationAppLaunchDetails();
 
       if (launchDetails?.didNotificationLaunchApp != true) {
         return;
@@ -242,8 +232,7 @@ class LocalNotificationService {
         );
       }
 
-      final alertType =
-          decoded['alertType']?.toString() ?? 'medication_due';
+      final alertType = decoded['alertType']?.toString() ?? 'medication_due';
 
       if (alertType == 'prior_reminder') {
         debugPrint('ℹ️ Scanner route ignored for prior reminder');
@@ -332,11 +321,11 @@ class LocalNotificationService {
   }
 
   // ══════════════════════════════════════════════════════════════
-  // SCHEDULE A DOSE  (✅ patientId added here)
+  // SCHEDULE A DOSE
   // ══════════════════════════════════════════════════════════════
 
   Future<void> scheduleForDose({
-    required String patientId, // ✅ FIX
+    required String patientId,
     required String scheduleId,
     required String medicationId,
     required String medicationName,
@@ -386,7 +375,7 @@ class LocalNotificationService {
     );
 
     final basePayload = <String, dynamic>{
-      'patientId': patientId, // ✅ FIX: include patientId
+      'patientId': patientId,
       'scheduleId': scheduleId,
       'medicationId': medicationId,
       'scheduledFor': scheduledFor.toIso8601String(),
@@ -450,8 +439,7 @@ class LocalNotificationService {
     await MedicationTtsService.instance.scheduleAutoOpen(
       alarmId: dueNativeAlarmId,
       startAt: scheduledFor,
-      message:
-      'It is time to take $medicationName. '
+      message: 'It is time to take $medicationName. '
           'Dosage: $dosageDisplay. Please confirm your medicine now.',
       payload: duePayload,
     );
@@ -459,6 +447,69 @@ class LocalNotificationService {
     if (escalationStep1Mins < 0 || escalationStep2Mins < 0) {
       debugPrint('⚠️ Invalid escalation values were supplied');
     }
+  }
+
+  // ══════════════════════════════════════════════════════════════
+  // SCHEDULE TEN-MINUTE RETRY AFTER REMINDER IS STOPPED
+  // ══════════════════════════════════════════════════════════════
+
+  Future<void> scheduleDoseRetry({
+    required String patientId,
+    required String scheduleId,
+    required String medicationId,
+    required String medicationName,
+    required String dosageDisplay,
+    required DateTime scheduledFor,
+    String? pillImageUrl,
+  }) async {
+    final safePatientId = patientId.trim();
+
+    if (safePatientId.isEmpty) {
+      debugPrint(
+        '⚠️ Cannot schedule medication retry: patientId is empty',
+      );
+      return;
+    }
+
+    final retryTime = DateTime.now().add(
+      const Duration(minutes: 10),
+    );
+
+    final retryAlarmId = _generateId(
+      scheduleId,
+      scheduledFor,
+      _retryNativeAlarmStep,
+    );
+
+    final retryPayload = jsonEncode(
+      <String, dynamic>{
+        'patientId': safePatientId,
+        'scheduleId': scheduleId,
+        'medicationId': medicationId,
+        'scheduledFor': scheduledFor.toIso8601String(),
+        'scheduledForMillis': scheduledFor.millisecondsSinceEpoch,
+        'medicationName': medicationName,
+        'dosageDisplay': dosageDisplay,
+        'pillImageUrl': pillImageUrl ?? '',
+        'alertType': 'medication_retry',
+        'retry': true,
+      },
+    );
+
+    await MedicationTtsService.instance.scheduleAutoOpen(
+      alarmId: retryAlarmId,
+      startAt: retryTime,
+      message: 'Your medication has not been confirmed as taken. '
+          'It is time to take $medicationName. '
+          'Dosage: $dosageDisplay. '
+          'Please confirm your medicine now.',
+      payload: retryPayload,
+    );
+
+    debugPrint(
+      '🔁 Medication retry scheduled for $retryTime '
+          '(alarmId=$retryAlarmId)',
+    );
   }
 
   // ══════════════════════════════════════════════════════════════
@@ -489,8 +540,9 @@ class LocalNotificationService {
         playSound: false,
         enableVibration: false,
         vibrationPattern: _noVibration,
-        category:
-        isUrgent ? AndroidNotificationCategory.alarm : AndroidNotificationCategory.reminder,
+        category: isUrgent
+            ? AndroidNotificationCategory.alarm
+            : AndroidNotificationCategory.reminder,
         enableLights: true,
         ledColor: const Color(0xFF00BFA5),
         ledOnMs: 500,
@@ -607,10 +659,26 @@ class LocalNotificationService {
     required DateTime scheduledFor,
   }) async {
     final notificationIds = <int>[
-      _generateId(scheduleId, scheduledFor, _dueNotificationStep),
-      _generateId(scheduleId, scheduledFor, _legacyEscalationStep1),
-      _generateId(scheduleId, scheduledFor, _legacyEscalationStep2),
-      _generateId(scheduleId, scheduledFor, _priorNotificationStep),
+      _generateId(
+        scheduleId,
+        scheduledFor,
+        _dueNotificationStep,
+      ),
+      _generateId(
+        scheduleId,
+        scheduledFor,
+        _legacyEscalationStep1,
+      ),
+      _generateId(
+        scheduleId,
+        scheduledFor,
+        _legacyEscalationStep2,
+      ),
+      _generateId(
+        scheduleId,
+        scheduledFor,
+        _priorNotificationStep,
+      ),
     ];
 
     for (final id in notificationIds) {
@@ -619,25 +687,47 @@ class LocalNotificationService {
       } catch (_) {}
     }
 
-    final priorNativeAlarmId =
-    _generateId(scheduleId, scheduledFor, _priorNativeAlarmStep);
-    final dueNativeAlarmId =
-    _generateId(scheduleId, scheduledFor, _dueNativeAlarmStep);
+    final priorNativeAlarmId = _generateId(
+      scheduleId,
+      scheduledFor,
+      _priorNativeAlarmStep,
+    );
 
-    await MedicationTtsService.instance
-        .cancelPriorReminder(priorNativeAlarmId);
+    final dueNativeAlarmId = _generateId(
+      scheduleId,
+      scheduledFor,
+      _dueNativeAlarmStep,
+    );
+
+    final retryNativeAlarmId = _generateId(
+      scheduleId,
+      scheduledFor,
+      _retryNativeAlarmStep,
+    );
+
+    await MedicationTtsService.instance.cancelPriorReminder(priorNativeAlarmId);
+
     await MedicationTtsService.instance.cancelAutoOpen(dueNativeAlarmId);
 
+    await MedicationTtsService.instance.cancelAutoOpen(retryNativeAlarmId);
+
+    /*
+     * Stops TTS, alarm.mp3, vibration, flashlight and foreground service.
+     */
     await MedicationTtsService.instance.stop();
+
     await _removeCachedPayload(
       scheduleId: scheduleId,
       scheduledFor: scheduledFor,
     );
+
+    debugPrint(
+      '🗑️ Cancelled all alerts, including retry, for '
+          '$scheduleId at $scheduledFor',
+    );
   }
 
-  Future<void> cancelSchedule(
-      String scheduleId,
-      ) async {
+  Future<void> cancelSchedule(String scheduleId) async {
     final pending = await _plugin.pendingNotificationRequests();
 
     final nativeAlarmIds = <int>{};
@@ -650,8 +740,7 @@ class LocalNotificationService {
         final decoded = jsonDecode(rawPayload);
         if (decoded is! Map<String, dynamic>) continue;
 
-        final payloadScheduleId =
-        decoded['scheduleId']?.toString();
+        final payloadScheduleId = decoded['scheduleId']?.toString();
         if (payloadScheduleId != scheduleId) continue;
 
         final scheduledFor = _scheduledTimeFromPayload(decoded);
@@ -661,6 +750,9 @@ class LocalNotificationService {
         );
         nativeAlarmIds.add(
           _generateId(scheduleId, scheduledFor, _dueNativeAlarmStep),
+        );
+        nativeAlarmIds.add(
+          _generateId(scheduleId, scheduledFor, _retryNativeAlarmStep),
         );
 
         try {
@@ -699,6 +791,9 @@ class LocalNotificationService {
         );
         nativeAlarmIds.add(
           _generateId(scheduleId, scheduledFor, _dueNativeAlarmStep),
+        );
+        nativeAlarmIds.add(
+          _generateId(scheduleId, scheduledFor, _retryNativeAlarmStep),
         );
       } catch (_) {}
     }
@@ -760,8 +855,7 @@ Future<void> _openScannerFromPayload({
       );
     }
 
-    final alertType = decoded['alertType']?.toString() ??
-        'medication_due';
+    final alertType = decoded['alertType']?.toString() ?? 'medication_due';
 
     if (alertType == 'prior_reminder') {
       return;
@@ -769,7 +863,7 @@ Future<void> _openScannerFromPayload({
 
     final scheduleId = decoded['scheduleId']?.toString();
     final medicationId = decoded['medicationId']?.toString();
-    final patientId = decoded['patientId']?.toString(); // ✅ FIX
+    final patientId = decoded['patientId']?.toString();
     final rawScheduledFor = decoded['scheduledFor']?.toString();
 
     if (scheduleId == null ||
@@ -795,7 +889,7 @@ Future<void> _openScannerFromPayload({
         ? dosageParts.sublist(1).join(' ')
         : (rawDosage.isNotEmpty ? rawDosage : 'dose');
 
-    final rawImageUrl = decoded['pillImageUrl']?.toString()?.trim();
+    final rawImageUrl = decoded['pillImageUrl']?.toString().trim();
     final medicationName = decoded['medicationName']
         ?.toString()
         .trim()
@@ -809,7 +903,7 @@ Future<void> _openScannerFromPayload({
         medicationName;
 
     final dose = TodayDose(
-      patientId: patientId, // ✅ FIX: pass patientId into TodayDose
+      patientId: patientId,
       scheduleId: scheduleId,
       medicationId: medicationId,
       medicationName: medicationName,
@@ -859,8 +953,7 @@ Future<void> _handleNotificationResponse(
       );
     }
 
-    final alertType =
-        decoded['alertType']?.toString() ?? 'medication_due';
+    final alertType = decoded['alertType']?.toString() ?? 'medication_due';
 
     if (alertType == 'prior_reminder') {
       return;
@@ -870,7 +963,7 @@ Future<void> _handleNotificationResponse(
       final scheduleId = decoded['scheduleId']?.toString();
       final medicationId = decoded['medicationId']?.toString();
       final scheduledForStr = decoded['scheduledFor']?.toString();
-      final patientId = decoded['patientId']?.toString(); // ✅ FIX
+      final patientId = decoded['patientId']?.toString();
 
       if (scheduleId == null ||
           scheduleId.trim().isEmpty ||
@@ -885,7 +978,7 @@ Future<void> _handleNotificationResponse(
         scheduleId: scheduleId,
         medicationId: medicationId,
         scheduledFor: DateTime.parse(scheduledForStr),
-        patientId: patientId, // ✅ FIX
+        patientId: patientId,
       );
 
       await MedicationTtsService.instance.stop();

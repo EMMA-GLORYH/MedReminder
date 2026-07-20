@@ -8,6 +8,7 @@ import 'package:path_provider/path_provider.dart';
 
 import '../../localization/app_localizations.dart';
 import '../../services/dose_log_service.dart';
+import '../../services/local_notification_service.dart';
 import '../../services/medication_tts_service.dart';
 import '../../services/schedule_service.dart';
 import '../../theme/app_colors.dart';
@@ -144,7 +145,6 @@ class _MedicationReminderScannerScreenState
     }
 
     // Stable file name based on URL hash
-    // (we also include the extension if present)
     final ext = _inferFileExtension(url) ?? '.img';
     final name = url.hashCode.toString();
 
@@ -203,6 +203,50 @@ class _MedicationReminderScannerScreenState
   }
 
   // ══════════════════════════════════════════════════════════════
+  // RETRY SCHEDULING
+  // ══════════════════════════════════════════════════════════════
+  Future<void> _scheduleRetryAfterStop() async {
+    final patientId = widget.dose.patientId?.trim();
+
+    if (patientId == null || patientId.isEmpty) {
+      debugPrint(
+        '⚠️ Medication retry not scheduled: patientId is missing',
+      );
+      return;
+    }
+
+    try {
+      await LocalNotificationService.instance.scheduleDoseRetry(
+        patientId: patientId,
+        scheduleId: widget.dose.scheduleId,
+        medicationId: widget.dose.medicationId,
+        medicationName: widget.dose.medicationName,
+        dosageDisplay: widget.dose.dosageDisplay,
+        scheduledFor: widget.dose.scheduledTime,
+        pillImageUrl: widget.dose.pillImageUrl,
+      );
+    } catch (error, stack) {
+      debugPrint(
+        '⚠️ Could not schedule medication retry: $error',
+      );
+      debugPrint('$stack');
+    }
+  }
+
+  // ══════════════════════════════════════════════════════════════
+  // STOP REMINDER
+  // ══════════════════════════════════════════════════════════════
+  Future<void> _stopReminder() async {
+    await MedicationTtsService.instance.stop();
+
+    await _scheduleRetryAfterStop();
+
+    if (mounted) {
+      Navigator.pop(context);
+    }
+  }
+
+  // ══════════════════════════════════════════════════════════════
   // BACK-PRESS GUARD
   // ══════════════════════════════════════════════════════════════
   Future<bool> _onWillPop() async {
@@ -233,7 +277,9 @@ class _MedicationReminderScannerScreenState
           actions: <Widget>[
             TextButton(
               onPressed: () {
-                Navigator.pop(dialogContext, false);
+                if (dialogContext.mounted) {
+                  Navigator.pop(dialogContext, false);
+                }
               },
               child: Text(
                 loc.t('cancel'),
@@ -250,9 +296,7 @@ class _MedicationReminderScannerScreenState
                   borderRadius: BorderRadius.circular(10),
                 ),
               ),
-              onPressed: () async {
-                await MedicationTtsService.instance.stop();
-
+              onPressed: () {
                 if (dialogContext.mounted) {
                   Navigator.pop(dialogContext, true);
                 }
@@ -308,14 +352,6 @@ class _MedicationReminderScannerScreenState
     }
   }
 
-  Future<void> _stopReminder() async {
-    await MedicationTtsService.instance.stop();
-
-    if (mounted) {
-      Navigator.pop(context);
-    }
-  }
-
   @override
   void dispose() {
     _pulseController.dispose();
@@ -327,8 +363,6 @@ class _MedicationReminderScannerScreenState
     final dose = widget.dose;
     final imageUrl = dose.pillImageUrl?.trim();
 
-    // If cached image is ready -> show it.
-    // If no cache yet -> show loading/progress.
     final canShowImage = _imageProvider != null;
     final hasUrl = imageUrl != null && imageUrl.isNotEmpty;
 
@@ -341,7 +375,9 @@ class _MedicationReminderScannerScreenState
         if (didPop) return;
 
         final shouldLeave = await _onWillPop();
-        if (shouldLeave && mounted) Navigator.pop(context);
+        if (shouldLeave && mounted) {
+          await _stopReminder();
+        }
       },
       child: AnimatedBuilder(
         animation: _pulseAnimation,
@@ -357,21 +393,23 @@ class _MedicationReminderScannerScreenState
                   child: Column(
                     children: <Widget>[
                       _ScannerHeader(
-                        onClose: _stopReminder,
+                        onClose: () async {
+                          final shouldLeave = await _onWillPop();
+                          if (shouldLeave && mounted) {
+                            await _stopReminder();
+                          }
+                        },
                         onMute: () => MedicationTtsService.instance.stop(),
                       ),
                       _MedicineInfoCard(dose: dose, pulseValue: pulseValue),
                       const SizedBox(height: 20),
-
                       Expanded(
                         child: Padding(
-                          padding:
-                          const EdgeInsets.symmetric(horizontal: 24),
+                          padding: const EdgeInsets.symmetric(horizontal: 24),
                           child: Container(
                             decoration: BoxDecoration(
                               color: Colors.black,
-                              borderRadius:
-                              BorderRadius.circular(24),
+                              borderRadius: BorderRadius.circular(24),
                               border: Border.all(
                                 color: AppColors.primary.withValues(
                                   alpha: 0.25 + (0.55 * pulseValue),
@@ -401,7 +439,6 @@ class _MedicationReminderScannerScreenState
                           ),
                         ),
                       ),
-
                       _BottomPanel(
                         isMarkingTaken: _isMarkingTaken,
                         onMarkTaken: _markAsTaken,
@@ -455,9 +492,10 @@ class _MedicationReminderScannerScreenState
               ),
             ),
             const SizedBox(height: 14),
-            const Text(
-              'Loading medicine image…',
-              style: TextStyle(
+            Text(
+              AppLocalizations.of(context).t('loadingMedicineImage') ??
+                  'Loading medicine image…',
+              style: const TextStyle(
                 color: Colors.white70,
                 fontSize: 14,
                 fontWeight: FontWeight.w500,
@@ -468,7 +506,6 @@ class _MedicationReminderScannerScreenState
       );
     }
 
-    // No cached image and no internet (or invalid URL)
     return const _NoImagePlaceholder(key: ValueKey('no-image'));
   }
 }
@@ -644,10 +681,7 @@ class _MedicineInfoCard extends StatelessWidget {
   }
 
   String _formatTime(DateTime dateTime) {
-    final hour = dateTime.hour % 12 == 0
-        ? 12
-        : dateTime.hour % 12;
-
+    final hour = dateTime.hour % 12 == 0 ? 12 : dateTime.hour % 12;
     final minute = dateTime.minute.toString().padLeft(2, '0');
     final period = dateTime.hour < 12 ? 'AM' : 'PM';
     return '$hour:$minute $period';

@@ -1,9 +1,5 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
-    <!--
-        The application can run on devices without a camera or flashlight.
-        Flashing will simply be skipped when the hardware is unavailable.
-    -->
     <uses-feature
         android:name="android.hardware.camera"
         android:required="false" />
@@ -12,7 +8,7 @@
         android:name="android.hardware.camera.flash"
         android:required="false" />
 
-    <!-- Required for loading medication images and Supabase Realtime. -->
+    <!-- Network and Supabase. -->
     <uses-permission android:name="android.permission.INTERNET" />
 
     <!-- Alarm and notification permissions. -->
@@ -23,33 +19,24 @@
     <uses-permission android:name="android.permission.SCHEDULE_EXACT_ALARM" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
 
-    <!--
-        Required by CameraManager.setTorchMode().
-        CAMERA is a runtime permission. Declaring it here does not
-        automatically grant it. The user must grant camera access at least
-        once before the physical flashlight can be controlled.
-    -->
+    <!-- Camera flashlight. -->
     <uses-permission android:name="android.permission.CAMERA" />
 
-    <!--
-        Required on supported Android versions for medication reminders that
-        use a full-screen notification intent over the lock screen.
-    -->
+    <!-- Full-screen medication reminder intent. -->
     <uses-permission android:name="android.permission.USE_FULL_SCREEN_INTENT" />
 
-    <!-- Required by TtsSpeakService (audio alarm). -->
+    <!-- Foreground services. -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK" />
-
-    <!--
-        Required by SosRealtimeService (background WebSocket / data sync).
-        Added for API 34+ foreground service type enforcement.
-    -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
 
-    <!-- Location permissions for SOS location reporting. -->
+    <!-- Location permissions for SOS reporting. -->
     <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
     <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
+
+    <!-- SMS fallback permissions. -->
+    <uses-permission android:name="android.permission.RECEIVE_SMS" />
+    <uses-permission android:name="android.permission.SEND_SMS" />
 
     <application
         android:name="${applicationName}"
@@ -83,17 +70,12 @@
             android:name="flutterEmbedding"
             android:value="2" />
 
-        <!--
-            flutter_local_notifications scheduled-notification receiver.
-        -->
+        <!-- Flutter local notification receiver. -->
         <receiver
             android:name="com.dexterous.flutterlocalnotifications.ScheduledNotificationReceiver"
             android:exported="false" />
 
-        <!--
-            Restores flutter_local_notifications notifications after reboot
-            or application replacement.
-        -->
+        <!-- Restores Flutter local notifications after reboot/update. -->
         <receiver
             android:name="com.dexterous.flutterlocalnotifications.ScheduledNotificationBootReceiver"
             android:exported="false">
@@ -105,20 +87,17 @@
             </intent-filter>
         </receiver>
 
-        <!-- Handles flutter_local_notifications action buttons. -->
+        <!-- Flutter notification action buttons. -->
         <receiver
             android:name="com.dexterous.flutterlocalnotifications.ActionBroadcastReceiver"
             android:exported="false" />
 
-        <!-- Receives native AlarmManager medication alerts. -->
+        <!-- Native medication alarm receiver. -->
         <receiver
             android:name=".TtsAlarmReceiver"
             android:exported="false" />
 
-        <!--
-            Restores the application's native TTS medication alarms after a
-            device reboot or application update.
-        -->
+        <!-- Restores native medication alarms after reboot/update. -->
         <receiver
             android:name=".BootRescheduleReceiver"
             android:exported="false">
@@ -131,9 +110,7 @@
         </receiver>
 
         <!--
-            Foreground service responsible for TTS, alarm sound, vibration
-            and best-effort physical flashlight flashing.
-            Used by both medication reminders and SOS alerts.
+            Handles TTS, MP3 playback, vibration and flashlight.
         -->
         <service
             android:name=".TtsSpeakService"
@@ -141,21 +118,25 @@
             android:foregroundServiceType="mediaPlayback" />
 
         <!--
-            Native background WebSocket service that keeps a Supabase
-            Realtime connection alive for the caretaker.
-
-            Fires TtsSpeakService directly when a patient SOS arrives,
-            bypassing Flutter entirely. This ensures the caretaker alarm
-            fires even when the phone is locked, the app is backgrounded,
-            or Flutter is paused.
-
-            foregroundServiceType="dataSync" is required on API 34+
-            for background network access.
+            Native Supabase Realtime monitoring for caretaker SOS alerts.
         -->
         <service
             android:name=".SosRealtimeService"
             android:exported="false"
             android:foregroundServiceType="dataSync" />
+
+        <!--
+            Receives tagged SOS SMS messages and starts TtsSpeakService
+            with caretaker_sos mode.
+        -->
+        <receiver
+            android:name=".SmsSosReceiver"
+            android:exported="true"
+            android:permission="android.permission.BROADCAST_SMS">
+            <intent-filter android:priority="999">
+                <action android:name="android.provider.Telephony.SMS_RECEIVED" />
+            </intent-filter>
+        </receiver>
 
     </application>
 

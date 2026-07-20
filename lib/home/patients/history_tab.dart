@@ -7,7 +7,14 @@ import 'package:mar/theme/app_text_styles.dart';
 import 'package:mar/widgets/loaders/skeleton_loader.dart';
 
 class HistoryTab extends StatefulWidget {
-  const HistoryTab({super.key});
+  final String patientId;
+  final String patientName;
+
+  const HistoryTab({
+    super.key,
+    required this.patientId,
+    required this.patientName,
+  });
 
   @override
   State<HistoryTab> createState() => _HistoryTabState();
@@ -32,7 +39,8 @@ class _HistoryTabState extends State<HistoryTab> {
     });
 
     try {
-      final data = await DoseLogService.instance.getDoseHistory();
+      final data = await DoseLogService.instance
+          .getDoseHistoryForPatient(widget.patientId);
       if (mounted) {
         setState(() {
           _history = data;
@@ -86,7 +94,7 @@ class _HistoryTabState extends State<HistoryTab> {
     return Scaffold(
       backgroundColor: AppColors.background,
       appBar: AppBar(
-        title: const Text('Dose Log History'),
+        title: Text('${widget.patientName} — Dose History'),
         elevation: 0,
         backgroundColor: Colors.transparent,
         foregroundColor: AppColors.textPrimary,

@@ -730,6 +730,81 @@ class DoseLogService {
   }
 
   // ══════════════════════════════════════════════════════════════
+  // FETCH DOSE HISTORY FOR ONE PATIENT — CARETAKER VIEW
+  // ══════════════════════════════════════════════════════════════
+
+  Future<List<Map<String, dynamic>>>
+  getDoseHistoryForPatient(
+      String patientId,
+      ) async {
+    final caregiverId =
+        AuthService.instance.currentUser?.id;
+
+    if (caregiverId == null) {
+      throw Exception('Not logged in');
+    }
+
+    final safePatientId = patientId.trim();
+
+    if (safePatientId.isEmpty) {
+      throw ArgumentError.value(
+        patientId,
+        'patientId',
+        'Patient ID cannot be empty',
+      );
+    }
+
+    /*
+     * Always verify the relationship before loading history.
+     * UI permission checks are useful for user feedback, but this service
+     * check prevents accidental access if the method is called elsewhere.
+     */
+    final relationship = await supabase
+        .from('care_relationships')
+        .select(
+      'can_view_logs, status',
+    )
+        .eq('patient_id', safePatientId)
+        .eq('caregiver_id', caregiverId)
+        .eq('status', 'active')
+        .maybeSingle();
+
+    if (relationship == null ||
+        relationship['can_view_logs'] != true) {
+      throw Exception(
+        'You are not permitted to view this patient\'s dose logs.',
+      );
+    }
+
+    try {
+      final data = await supabase
+          .from('dose_history_view')
+          .select()
+          .eq('patient_id', safePatientId)
+          .order(
+        'scheduled_for',
+        ascending: false,
+      );
+
+      debugPrint(
+        '✅ Loaded ${data.length} dose-history records '
+            'for patient $safePatientId',
+      );
+
+      return List<Map<String, dynamic>>.from(
+        data,
+      );
+    } catch (error, stack) {
+      debugPrint(
+        '❌ Failed to fetch dose history for patient '
+            '$safePatientId: $error',
+      );
+      debugPrint('$stack');
+      rethrow;
+    }
+  }
+
+  // ══════════════════════════════════════════════════════════════
   // LOCAL PENDING-LOG STORAGE
   // ══════════════════════════════════════════════════════════════
 

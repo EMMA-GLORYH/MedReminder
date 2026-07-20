@@ -402,7 +402,7 @@ class _CaretakerHomeScreenState
               children: const [
                 CaretakerDashboardTab(),
                 PatientsTab(),
-                AlertsTab(),
+                AlertsTab(patientId: '', patientName: '',),
                 CaretakerProfileTab(),
               ],
             ),

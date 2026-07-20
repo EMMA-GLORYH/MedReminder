@@ -648,4 +648,62 @@ class CareRelationshipService {
     }
     return result as String;
   }
+
+  // ══════════════════════════════════════════════════════════════
+  // CARETAKER PATIENT ACCESS
+  // ══════════════════════════════════════════════════════════════
+
+  Future<CareRelationship?> getPatientRelationship(
+      String patientId,
+      ) async {
+    final caregiverId =
+        AuthService.instance.currentUser?.id;
+
+    if (caregiverId == null) {
+      throw Exception('Not logged in');
+    }
+
+    final data = await supabase
+        .from('care_relationships')
+        .select()
+        .eq('patient_id', patientId)
+        .eq('caregiver_id', caregiverId)
+        .eq('status', 'active')
+        .maybeSingle();
+
+    if (data == null) {
+      return null;
+    }
+
+    return CareRelationship.fromJson(
+      Map<String, dynamic>.from(data),
+    );
+  }
+
+  Future<bool> canViewPatientLogs(
+      String patientId,
+      ) async {
+    final relationship =
+    await getPatientRelationship(patientId);
+
+    return relationship?.canViewLogs == true;
+  }
+
+  Future<bool> canViewPatientMedications(
+      String patientId,
+      ) async {
+    final relationship =
+    await getPatientRelationship(patientId);
+
+    return relationship?.canViewMedications == true;
+  }
+
+  Future<bool> canReceivePatientAlerts(
+      String patientId,
+      ) async {
+    final relationship =
+    await getPatientRelationship(patientId);
+
+    return relationship?.canReceiveAlerts == true;
+  }
 }

@@ -60,7 +60,7 @@ class _PatientHomeScreenState extends State<PatientHomeScreen> {
     final tabs = <Widget>[
       DashboardTab(onNavigateToTab: _selectTab),
       const MedicationsTab(),
-      const HistoryTab(),
+      const HistoryTab(patientId: '', patientName: '',),
       const ProfileTab(),
     ];
 

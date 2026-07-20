@@ -1,6 +1,10 @@
 // lib/services/sos_service.dart
 
+import 'dart:convert';
+
 import 'package:flutter/foundation.dart';
+import 'package:flutter/services.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 
 import '../main.dart';
@@ -20,24 +24,50 @@ class SosCaretakerContact {
 
   bool get hasPhoneNumber {
     final phone = phoneNumber;
-    return phone != null && phone.trim().isNotEmpty;
+
+    return phone != null &&
+        phone.trim().isNotEmpty;
+  }
+
+  Map<String, dynamic> toJson() {
+    return <String, dynamic>{
+      'id': id,
+      'name': name,
+      'phoneNumber': phoneNumber,
+    };
+  }
+
+  factory SosCaretakerContact.fromJson(
+      Map<String, dynamic> json,
+      ) {
+    return SosCaretakerContact(
+      id: json['id']?.toString() ?? '',
+      name: json['name']?.toString() ?? 'Caretaker',
+      phoneNumber: json['phoneNumber']?.toString(),
+    );
   }
 }
 
 class SosDispatchResult {
   final List<String> alertIds;
   final List<SosCaretakerContact> caretakers;
+  final String requestKey;
+  final bool deliveredBySms;
 
   const SosDispatchResult({
     required this.alertIds,
     required this.caretakers,
+    required this.requestKey,
+    this.deliveredBySms = false,
   });
 
   int get caretakerCount => caretakers.length;
 
   SosCaretakerContact? get firstCallableCaretaker {
     for (final caretaker in caretakers) {
-      if (caretaker.hasPhoneNumber) return caretaker;
+      if (caretaker.hasPhoneNumber) {
+        return caretaker;
+      }
     }
 
     return null;
@@ -56,10 +86,18 @@ class SosDispatchException implements Exception {
 class SosService {
   SosService._();
 
-  static final SosService instance = SosService._();
+  static final SosService instance =
+  SosService._();
+
+  static const MethodChannel _smsChannel =
+  MethodChannel('sos_sms_fallback');
+
+  static const String _cachedCaretakersKey =
+      'cached_sos_caretaker_contacts_v1';
 
   String _requireCurrentUserId() {
-    final userId = AuthService.instance.currentUser?.id;
+    final userId =
+        AuthService.instance.currentUser?.id;
 
     if (userId == null) {
       throw const SosDispatchException(
@@ -71,104 +109,69 @@ class SosService {
   }
 
   // ══════════════════════════════════════════════════════════════
-  // SEND SOS WITH LOCATION
+  // SEND SOS
   // ══════════════════════════════════════════════════════════════
 
   Future<SosDispatchResult> sendSos({
-    String message = 'Patient requested urgent assistance',
+    String message =
+    'Patient requested urgent assistance',
   }) async {
     final patientId = _requireCurrentUserId();
 
     final requestKey =
-        '${patientId}_${DateTime.now().toUtc().microsecondsSinceEpoch}';
+        '${patientId}_'
+        '${DateTime.now().toUtc().microsecondsSinceEpoch}';
+
+    /*
+     * First try to use the current online caretaker relationships.
+     * This also refreshes the locally cached phone numbers.
+     */
+    List<SosCaretakerContact> cachedContacts =
+    await _readCachedCaretakers();
 
     try {
       final rawRelationships = await supabase
           .from('care_relationships')
           .select(
         '''
-            id,
-            patient_id,
-            caregiver_id,
-            status,
-            can_receive_alerts
-            ''',
+        id,
+        patient_id,
+        caregiver_id,
+        status,
+        can_receive_alerts
+        ''',
       )
           .eq('patient_id', patientId);
 
-      final relationships = List<Map<String, dynamic>>.from(
+      final relationships =
+      List<Map<String, dynamic>>.from(
         rawRelationships as List,
       );
 
-      debugPrint(
-        '🔍 SOS relationships for patient $patientId: $relationships',
-      );
+      final eligible = relationships.where(
+            (relationship) {
+          final status =
+          relationship['status']?.toString();
 
-      final eligible = relationships.where((relationship) {
-        final status = relationship['status']?.toString();
-        final canReceiveAlerts =
-            relationship['can_receive_alerts'] != false;
+          final canReceiveAlerts =
+              relationship['can_receive_alerts'] != false;
 
-        return status == 'active' && canReceiveAlerts;
-      }).toList();
+          return status == 'active' &&
+              canReceiveAlerts;
+        },
+      ).toList();
 
       if (eligible.isEmpty) {
-        final hasPending = relationships.any(
-              (relationship) =>
-          relationship['status']?.toString() == 'pending',
-        );
-
-        final hasRevoked = relationships.any(
-              (relationship) =>
-          relationship['status']?.toString() == 'revoked',
-        );
-
-        final hasActiveWithAlertsDisabled = relationships.any(
-              (relationship) =>
-          relationship['status']?.toString() == 'active' &&
-              relationship['can_receive_alerts'] == false,
-        );
-
-        if (hasPending) {
-          throw const SosDispatchException(
-            'Your caretaker invitation is still pending. '
-                'The caretaker must accept it before receiving SOS alerts.',
-          );
-        }
-
-        if (hasRevoked) {
-          throw const SosDispatchException(
-            'Your previous caretaker connection was revoked. '
-                'Invite the caretaker again and wait for acceptance.',
-          );
-        }
-
-        if (hasActiveWithAlertsDisabled) {
-          throw const SosDispatchException(
-            'Your caretaker is connected, but SOS alerts are disabled. '
-                'Enable alerts in the caretaker permissions.',
-          );
-        }
-
-        throw const SosDispatchException(
-          'No active caretaker is currently available to receive SOS alerts.',
-        );
+        throw _relationshipError(relationships);
       }
 
       final location =
-      await SosLocationService.instance.getCurrentLocation();
-
-      debugPrint(
-        location == null
-            ? '⚠️ SOS will be sent without location'
-            : '📍 SOS location: '
-            '${location.latitude}, ${location.longitude} '
-            '±${location.accuracy.toStringAsFixed(0)}m',
-      );
+      await SosLocationService.instance
+          .getCurrentLocation();
 
       final response = await supabase.rpc(
         'create_sos_alerts',
-        params: {
+        params: <String, dynamic>{
           'p_request_key': requestKey,
           'p_message': message,
           'p_latitude': location?.latitude,
@@ -183,117 +186,395 @@ class SosService {
 
       if (rows.isEmpty) {
         throw const SosDispatchException(
-          'The SOS could not be delivered to your active caretaker.',
+          'The SOS could not be delivered to your '
+              'active caretaker.',
         );
       }
 
       final alertIds = <String>[];
-      final contacts = <String, SosCaretakerContact>{};
+      final contacts =
+      <String, SosCaretakerContact>{};
 
       for (final row in rows) {
-        final alertId = row['alert_id']?.toString();
-        final caregiverId = row['caregiver_id']?.toString();
+        final alertId =
+        row['alert_id']?.toString();
 
-        if (alertId != null && alertId.isNotEmpty) {
+        final caregiverId =
+        row['caregiver_id']?.toString();
+
+        if (alertId != null &&
+            alertId.isNotEmpty) {
           alertIds.add(alertId);
         }
 
-        if (caregiverId == null || caregiverId.isEmpty) {
+        if (caregiverId == null ||
+            caregiverId.isEmpty) {
           continue;
         }
 
-        contacts[caregiverId] = SosCaretakerContact(
-          id: caregiverId,
-          name: row['caregiver_name']?.toString() ?? 'Caretaker',
-          phoneNumber: row['caregiver_phone']?.toString(),
-        );
+        contacts[caregiverId] =
+            SosCaretakerContact(
+              id: caregiverId,
+              name: row['caregiver_name']
+                  ?.toString() ??
+                  'Caretaker',
+              phoneNumber:
+              row['caregiver_phone']?.toString(),
+            );
       }
 
       if (contacts.isEmpty) {
         throw const SosDispatchException(
-          'The SOS was created, but caretaker contact details were unavailable.',
+          'The SOS was created, but caretaker '
+              'contact details were unavailable.',
         );
       }
 
+      final currentContacts =
+      contacts.values.toList();
+
+      /*
+       * Cache numbers while online. These are used if a later SOS occurs
+       * when the patient has no internet connection.
+       */
+      await _writeCachedCaretakers(
+        currentContacts,
+      );
+
       debugPrint(
-        '✅ SOS delivered to ${contacts.length} caretaker(s)',
+        '✅ SOS delivered online to '
+            '${currentContacts.length} caretaker(s)',
       );
 
       return SosDispatchResult(
         alertIds: alertIds,
-        caretakers: contacts.values.toList(),
+        caretakers: currentContacts,
+        requestKey: requestKey,
+        deliveredBySms: false,
       );
-    } on SosDispatchException {
-      rethrow;
     } catch (error, stack) {
-      debugPrint('❌ SOS dispatch error: $error');
+      debugPrint(
+        '⚠️ Online SOS dispatch failed: $error',
+      );
       debugPrint('$stack');
 
-      throw const SosDispatchException(
-        'Could not send the SOS. Please try again or call for help.',
+      /*
+       * Do not use SMS for authentication/relationship errors when we know
+       * the patient has no eligible caretaker. For network/RPC failures,
+       * use previously cached caretaker contacts.
+       */
+      if (error is SosDispatchException &&
+          _isRelationshipError(error)) {
+        rethrow;
+      }
+
+      cachedContacts = cachedContacts
+          .where((caretaker) => caretaker.hasPhoneNumber)
+          .toList();
+
+      if (cachedContacts.isEmpty) {
+        throw const SosDispatchException(
+          'SOS could not be sent online, and no cached '
+              'caretaker phone numbers are available for SMS.',
+        );
+      }
+
+      final location =
+      await SosLocationService.instance
+          .getCurrentLocation();
+
+      final smsBody = _buildSmsBody(
+        requestKey: requestKey,
+        patientName: await _patientName(),
+        location: location,
       );
+
+      try {
+        final sentCount =
+        await _sendSmsFallback(
+          caretakers: cachedContacts,
+          body: smsBody,
+        );
+
+        if (sentCount <= 0) {
+          throw const SosDispatchException(
+            'SMS fallback could not be sent to any caretaker.',
+          );
+        }
+
+        debugPrint(
+          '✅ SOS SMS fallback sent to '
+              '$sentCount caretaker(s)',
+        );
+
+        return SosDispatchResult(
+          alertIds: const <String>[],
+          caretakers: cachedContacts,
+          requestKey: requestKey,
+          deliveredBySms: true,
+        );
+      } catch (smsError, smsStack) {
+        debugPrint(
+          '❌ SOS SMS fallback failed: $smsError',
+        );
+        debugPrint('$smsStack');
+
+        throw SosDispatchException(
+          'Could not send the SOS online or by SMS. '
+              'Please call your caretaker directly.',
+        );
+      }
     }
   }
 
   // ══════════════════════════════════════════════════════════════
-  // LOAD CARETAKER ALERTS INCLUDING PATIENT LOCATION
+  // SMS FALLBACK
   // ══════════════════════════════════════════════════════════════
 
-  Future<List<Map<String, dynamic>>> getCaretakerAlerts() async {
+  Future<int> _sendSmsFallback({
+    required List<SosCaretakerContact> caretakers,
+    required String body,
+  }) async {
+    final recipients = caretakers
+        .where((caretaker) => caretaker.hasPhoneNumber)
+        .map((caretaker) => caretaker.phoneNumber!.trim())
+        .toSet()
+        .toList();
+
+    if (recipients.isEmpty) {
+      return 0;
+    }
+
+    final result =
+    await _smsChannel.invokeMethod<int>(
+      'sendSosSms',
+      <String, dynamic>{
+        'recipients': recipients,
+        'message': body,
+      },
+    );
+
+    return result ?? 0;
+  }
+
+  String _buildSmsBody({
+    required String requestKey,
+    required String patientName,
+    required SosLocation? location,
+  }) {
+    final safeName = patientName
+        .replaceAll('|', ' ')
+        .replaceAll('\n', ' ')
+        .trim();
+
+    final coordinates =
+    location == null
+        ? ''
+        : ' | g:${location.latitude},'
+        '${location.longitude}';
+
+    return 'MAR-SOS k:$requestKey | '
+        'n:${safeName.isEmpty ? 'A patient' : safeName}'
+        '$coordinates';
+  }
+
+  Future<String> _patientName() async {
+    try {
+      final profile =
+      await AuthService.instance.getCurrentProfile();
+
+      final name = profile?.fullName.trim();
+
+      if (name != null && name.isNotEmpty) {
+        return name;
+      }
+    } catch (_) {}
+
+    return 'A patient';
+  }
+
+  // ══════════════════════════════════════════════════════════════
+  // CARETAKER CACHE
+  // ══════════════════════════════════════════════════════════════
+
+  Future<void> _writeCachedCaretakers(
+      List<SosCaretakerContact> contacts,
+      ) async {
+    try {
+      final preferences =
+      await SharedPreferences.getInstance();
+
+      await preferences.setString(
+        _cachedCaretakersKey,
+        jsonEncode(
+          contacts.map((contact) => contact.toJson()).toList(),
+        ),
+      );
+    } catch (error) {
+      debugPrint(
+        '⚠️ Could not cache caretaker contacts: $error',
+      );
+    }
+  }
+
+  Future<List<SosCaretakerContact>>
+  _readCachedCaretakers() async {
+    try {
+      final preferences =
+      await SharedPreferences.getInstance();
+
+      final raw = preferences.getString(
+        _cachedCaretakersKey,
+      );
+
+      if (raw == null || raw.trim().isEmpty) {
+        return <SosCaretakerContact>[];
+      }
+
+      final decoded = jsonDecode(raw);
+
+      if (decoded is! List) {
+        return <SosCaretakerContact>[];
+      }
+
+      return decoded
+          .whereType<Map>()
+          .map(
+            (item) => SosCaretakerContact.fromJson(
+          Map<String, dynamic>.from(item),
+        ),
+      )
+          .where(
+            (contact) => contact.id.isNotEmpty,
+      )
+          .toList();
+    } catch (error) {
+      debugPrint(
+        '⚠️ Could not read cached caretaker contacts: $error',
+      );
+
+      return <SosCaretakerContact>[];
+    }
+  }
+
+  bool _isRelationshipError(
+      SosDispatchException error,
+      ) {
+    return error.message.contains(
+      'invitation is still pending',
+    ) ||
+        error.message.contains(
+          'connection was revoked',
+        ) ||
+        error.message.contains(
+          'alerts are disabled',
+        ) ||
+        error.message.contains(
+          'No active caretaker',
+        );
+  }
+
+  SosDispatchException _relationshipError(
+      List<Map<String, dynamic>> relationships,
+      ) {
+    final hasPending = relationships.any(
+          (relationship) =>
+      relationship['status']?.toString() ==
+          'pending',
+    );
+
+    final hasRevoked = relationships.any(
+          (relationship) =>
+      relationship['status']?.toString() ==
+          'revoked',
+    );
+
+    final hasDisabled = relationships.any(
+          (relationship) =>
+      relationship['status']?.toString() ==
+          'active' &&
+          relationship['can_receive_alerts'] ==
+              false,
+    );
+
+    if (hasPending) {
+      return const SosDispatchException(
+        'Your caretaker invitation is still pending. '
+            'The caretaker must accept it before receiving SOS alerts.',
+      );
+    }
+
+    if (hasRevoked) {
+      return const SosDispatchException(
+        'Your previous caretaker connection was revoked. '
+            'Invite the caretaker again and wait for acceptance.',
+      );
+    }
+
+    if (hasDisabled) {
+      return const SosDispatchException(
+        'Your caretaker is connected, but SOS alerts are disabled.',
+      );
+    }
+
+    return const SosDispatchException(
+      'No active caretaker is currently available to receive SOS alerts.',
+    );
+  }
+
+  // ══════════════════════════════════════════════════════════════
+  // EXISTING CARETAKER METHODS
+  // ══════════════════════════════════════════════════════════════
+
+  Future<List<Map<String, dynamic>>> getCaretakerAlerts({
+    String? patientId,
+  }) async {
     final caregiverId = _requireCurrentUserId();
 
-    final data = await supabase
+    var query = supabase
         .from('sos_alerts')
-        .select(
-      '''
+        .select('''
+        id,
+        relationship_id,
+        patient_id,
+        caregiver_id,
+        request_key,
+        patient_name,
+        message,
+        status,
+        latitude,
+        longitude,
+        location_accuracy_m,
+        location_captured_at,
+        acknowledged_at,
+        resolved_at,
+        created_at,
+        updated_at,
+        patient:profiles!sos_alerts_patient_id_fkey(
           id,
-          relationship_id,
-          patient_id,
-          caregiver_id,
-          request_key,
-          patient_name,
-          message,
-          status,
-          latitude,
-          longitude,
-          location_accuracy_m,
-          location_captured_at,
-          acknowledged_at,
-          resolved_at,
-          created_at,
-          updated_at,
-          patient:profiles!sos_alerts_patient_id_fkey(
-            id,
-            full_name,
-            phone_number,
-            avatar_url
-          )
-          ''',
-    )
-        .eq('caregiver_id', caregiverId)
+          full_name,
+          phone_number,
+          avatar_url
+        )
+      ''')
+        .eq('caregiver_id', caregiverId);
+
+    final selectedPatientId = patientId?.trim();
+
+    if (selectedPatientId != null &&
+        selectedPatientId.isNotEmpty) {
+      query = query.eq(
+        'patient_id',
+        selectedPatientId,
+      );
+    }
+
+    final data = await query
         .order('created_at', ascending: false)
         .limit(100);
 
-    final rows = List<Map<String, dynamic>>.from(data);
-
-    debugPrint('🔍 Loaded ${rows.length} caretaker SOS alert(s)');
-
-    for (final row in rows) {
-      debugPrint(
-        '🗺️ Alert ${row['id']}: '
-            'patient=${row['patient_name']}, '
-            'lat=${row['latitude']}, '
-            'lng=${row['longitude']}, '
-            'status=${row['status']}',
-      );
-    }
-
-    return rows;
+    return List<Map<String, dynamic>>.from(data);
   }
-
-  // ══════════════════════════════════════════════════════════════
-  // REALTIME / WEBSOCKET SUBSCRIPTION
-  // ══════════════════════════════════════════════════════════════
 
   RealtimeChannel subscribeToCaretakerAlerts(
       void Function(PostgresChangePayload payload) onChanged,
@@ -321,17 +602,17 @@ class SosService {
     return channel;
   }
 
-  // ══════════════════════════════════════════════════════════════
-  // ACKNOWLEDGE ALERT
-  // ══════════════════════════════════════════════════════════════
-
-  Future<void> acknowledgeAlert(String alertId) async {
+  Future<void> acknowledgeAlert(
+      String alertId,
+      ) async {
     final caregiverId = _requireCurrentUserId();
-    final now = DateTime.now().toUtc().toIso8601String();
+    final now = DateTime.now()
+        .toUtc()
+        .toIso8601String();
 
     final updated = await supabase
         .from('sos_alerts')
-        .update({
+        .update(<String, dynamic>{
       'status': 'acknowledged',
       'acknowledged_at': now,
       'updated_at': now,
@@ -348,17 +629,17 @@ class SosService {
     }
   }
 
-  // ══════════════════════════════════════════════════════════════
-  // RESOLVE ALERT
-  // ══════════════════════════════════════════════════════════════
-
-  Future<void> resolveAlert(String alertId) async {
+  Future<void> resolveAlert(
+      String alertId,
+      ) async {
     final caregiverId = _requireCurrentUserId();
-    final now = DateTime.now().toUtc().toIso8601String();
+    final now = DateTime.now()
+        .toUtc()
+        .toIso8601String();
 
     final updated = await supabase
         .from('sos_alerts')
-        .update({
+        .update(<String, dynamic>{
       'status': 'resolved',
       'resolved_at': now,
       'updated_at': now,
@@ -367,7 +648,7 @@ class SosService {
         .eq('caregiver_id', caregiverId)
         .inFilter(
       'status',
-      const [
+      const <String>[
         'sent',
         'acknowledged',
       ],
@@ -381,17 +662,17 @@ class SosService {
     }
   }
 
-  // ══════════════════════════════════════════════════════════════
-  // PATIENT CANCELLATION
-  // ══════════════════════════════════════════════════════════════
-
-  Future<void> cancelPatientAlert(String alertId) async {
+  Future<void> cancelPatientAlert(
+      String alertId,
+      ) async {
     final patientId = _requireCurrentUserId();
-    final now = DateTime.now().toUtc().toIso8601String();
+    final now = DateTime.now()
+        .toUtc()
+        .toIso8601String();
 
     await supabase
         .from('sos_alerts')
-        .update({
+        .update(<String, dynamic>{
       'status': 'cancelled',
       'updated_at': now,
     })

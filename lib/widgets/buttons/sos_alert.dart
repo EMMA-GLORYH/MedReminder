@@ -5,7 +5,6 @@ import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
-import 'package:mar/services/auth_service.dart';
 import 'package:mar/services/sos_service.dart';
 import 'package:mar/theme/app_colors.dart';
 import 'package:mar/theme/app_text_styles.dart';
@@ -22,6 +21,10 @@ class _SosAlertButtonState extends State<SosAlertButton>
     with TickerProviderStateMixin {
   static const Duration _holdDuration = Duration(seconds: 5);
   static const double _buttonSize = 72;
+
+  static const MethodChannel _smsChannel = MethodChannel(
+    'sos_sms_fallback',
+  );
 
   final GlobalKey _buttonKey = GlobalKey();
 
@@ -58,17 +61,29 @@ class _SosAlertButtonState extends State<SosAlertButton>
 
     _wave1 = CurvedAnimation(
       parent: _waveController,
-      curve: const Interval(0.0, 0.7, curve: Curves.easeOut),
+      curve: const Interval(
+        0.0,
+        0.7,
+        curve: Curves.easeOut,
+      ),
     );
 
     _wave2 = CurvedAnimation(
       parent: _waveController,
-      curve: const Interval(0.2, 0.9, curve: Curves.easeOut),
+      curve: const Interval(
+        0.2,
+        0.9,
+        curve: Curves.easeOut,
+      ),
     );
 
     _wave3 = CurvedAnimation(
       parent: _waveController,
-      curve: const Interval(0.4, 1.0, curve: Curves.easeOut),
+      curve: const Interval(
+        0.4,
+        1.0,
+        curve: Curves.easeOut,
+      ),
     );
   }
 
@@ -78,13 +93,53 @@ class _SosAlertButtonState extends State<SosAlertButton>
     _holdHapticTimer?.cancel();
     _holdStopwatch?.stop();
     _removeRadiationOverlay();
+
     _fillController.dispose();
     _waveController.dispose();
+
     super.dispose();
   }
 
+  // ══════════════════════════════════════════════════════════════
+  // SMS PERMISSION
+  // ══════════════════════════════════════════════════════════════
+
+  Future<bool> _ensureSmsPermission() async {
+    try {
+      final granted =
+      await _smsChannel.invokeMethod<bool>(
+        'requestSmsPermission',
+      );
+
+      return granted == true;
+    } on MissingPluginException catch (error) {
+      debugPrint(
+        '⚠️ SMS native channel is unavailable: $error',
+      );
+      return false;
+    } on PlatformException catch (error) {
+      debugPrint(
+        '⚠️ Could not request SMS permission: '
+            '${error.message}',
+      );
+      return false;
+    } catch (error, stack) {
+      debugPrint(
+        '⚠️ SMS permission request failed: $error',
+      );
+      debugPrint('$stack');
+      return false;
+    }
+  }
+
+  // ══════════════════════════════════════════════════════════════
+  // HOLD HANDLING
+  // ══════════════════════════════════════════════════════════════
+
   void _beginHold() {
-    if (_isSending || _isPressing) return;
+    if (_isSending || _isPressing) {
+      return;
+    }
 
     HapticFeedback.mediumImpact();
 
@@ -95,7 +150,9 @@ class _SosAlertButtonState extends State<SosAlertButton>
     _triggeredThisHold = false;
     _holdStopwatch = Stopwatch()..start();
 
-    setState(() => _isPressing = true);
+    setState(() {
+      _isPressing = true;
+    });
 
     _showRadiationOverlay();
 
@@ -120,30 +177,46 @@ class _SosAlertButtonState extends State<SosAlertButton>
   void _armHoldTimer(Duration delay) {
     _holdTimer?.cancel();
 
-    _holdTimer = Timer(delay, () {
-      if (!_isPressing || _isSending || _triggeredThisHold) return;
+    _holdTimer = Timer(
+      delay,
+          () {
+        if (!_isPressing ||
+            _isSending ||
+            _triggeredThisHold) {
+          return;
+        }
 
-      final elapsed = _holdStopwatch?.elapsed ?? Duration.zero;
+        final elapsed =
+            _holdStopwatch?.elapsed ??
+                Duration.zero;
 
-      if (elapsed < _holdDuration) {
-        _armHoldTimer(_holdDuration - elapsed);
-        return;
-      }
+        if (elapsed < _holdDuration) {
+          _armHoldTimer(
+            _holdDuration - elapsed,
+          );
+          return;
+        }
 
-      _triggeredThisHold = true;
-      _holdStopwatch?.stop();
-      _triggerSos();
-    });
+        _triggeredThisHold = true;
+        _holdStopwatch?.stop();
+
+        unawaited(_triggerSos());
+      },
+    );
   }
 
   void _releaseHold() {
-    if (!_isPressing || _isSending) return;
+    if (!_isPressing || _isSending) {
+      return;
+    }
 
     _holdTimer?.cancel();
     _holdHapticTimer?.cancel();
     _holdStopwatch?.stop();
 
-    setState(() => _isPressing = false);
+    setState(() {
+      _isPressing = false;
+    });
 
     _waveController
       ..stop()
@@ -153,11 +226,14 @@ class _SosAlertButtonState extends State<SosAlertButton>
       _fillController
           .animateBack(
         0,
-        duration: const Duration(milliseconds: 250),
+        duration: const Duration(
+          milliseconds: 250,
+        ),
         curve: Curves.easeOut,
       )
           .then((_) {
         if (!mounted) return;
+
         if (!_isPressing && !_isSending) {
           _removeRadiationOverlay();
         }
@@ -165,13 +241,26 @@ class _SosAlertButtonState extends State<SosAlertButton>
     }
   }
 
-  void _handlePointerMove(PointerMoveEvent event) {
-    if (!_isPressing || _isSending) return;
+  void _handlePointerMove(
+      PointerMoveEvent event,
+      ) {
+    if (!_isPressing || _isSending) {
+      return;
+    }
 
-    final renderObject = _buttonKey.currentContext?.findRenderObject();
-    if (renderObject is! RenderBox || !renderObject.hasSize) return;
+    final renderObject =
+    _buttonKey.currentContext?.findRenderObject();
 
-    final topLeft = renderObject.localToGlobal(Offset.zero);
+    if (renderObject is! RenderBox ||
+        !renderObject.hasSize) {
+      return;
+    }
+
+    final topLeft =
+    renderObject.localToGlobal(
+      Offset.zero,
+    );
+
     final bounds = Rect.fromLTWH(
       topLeft.dx,
       topLeft.dy,
@@ -184,16 +273,32 @@ class _SosAlertButtonState extends State<SosAlertButton>
     }
   }
 
+  // ══════════════════════════════════════════════════════════════
+  // RADIATION OVERLAY
+  // ══════════════════════════════════════════════════════════════
+
   void _showRadiationOverlay() {
     _removeRadiationOverlay();
 
-    final renderObject = _buttonKey.currentContext?.findRenderObject();
-    if (renderObject is! RenderBox || !renderObject.hasSize) return;
+    final renderObject =
+    _buttonKey.currentContext?.findRenderObject();
+
+    if (renderObject is! RenderBox ||
+        !renderObject.hasSize) {
+      return;
+    }
 
     final buttonCenter =
-    renderObject.localToGlobal(renderObject.size.center(Offset.zero));
+    renderObject.localToGlobal(
+      renderObject.size.center(
+        Offset.zero,
+      ),
+    );
 
-    final overlayState = Overlay.of(context, rootOverlay: true);
+    final overlayState = Overlay.of(
+      context,
+      rootOverlay: true,
+    );
 
     _radiationOverlay = OverlayEntry(
       builder: (_) {
@@ -225,18 +330,34 @@ class _SosAlertButtonState extends State<SosAlertButton>
 
   void _finishRadiation() {
     _removeRadiationOverlay();
-    if (_fillController.isAnimating) _fillController.stop();
+
+    if (_fillController.isAnimating) {
+      _fillController.stop();
+    }
+
     _fillController.reset();
   }
 
   // ══════════════════════════════════════════════════════════════
-  // SOS DISPATCH — alarm plays ONLY on the caretaker's phone,
-  // NOT on the patient's phone. The caretaker receives the SOS
-  // via SosRealtimeService.kt (native WebSocket) which fires
-  // TtsSpeakService directly.
+  // SOS DISPATCH
+  //
+  // The patient's phone does not play the SOS alarm.
+  //
+  // SosService:
+  // - tries Supabase Realtime first;
+  // - falls back to native SMS if online dispatch fails;
+  // - sends SMS to all cached eligible caretaker numbers.
+  //
+  // The caretaker phone:
+  // - receives Realtime when online;
+  // - receives MAR-SOS SMS when the SMS fallback is used;
+  // - starts TtsSpeakService with caretaker_sos.mp3.
   // ══════════════════════════════════════════════════════════════
+
   Future<void> _triggerSos() async {
-    if (_isSending) return;
+    if (_isSending) {
+      return;
+    }
 
     _holdTimer?.cancel();
     _holdHapticTimer?.cancel();
@@ -259,62 +380,129 @@ class _SosAlertButtonState extends State<SosAlertButton>
       });
     }
 
+    /*
+     * Request SMS permission before sending. If the permission dialog is
+     * displayed, the current send attempt may still use the online path.
+     * The user should grant this permission before testing offline fallback.
+     */
+    final smsPermissionGranted =
+    await _ensureSmsPermission();
+
+    if (!smsPermissionGranted) {
+      debugPrint(
+        '⚠️ SMS permission is not granted. '
+            'Online SOS will still be attempted.',
+      );
+    }
+
     try {
-      final result = await SosService.instance.sendSos();
+      final result =
+      await SosService.instance.sendSos();
 
-      if (!mounted) return;
+      if (!mounted) {
+        return;
+      }
 
-      final caretakerCount = result.caretakerCount;
-      final callableCaretaker = result.firstCallableCaretaker;
+      final caretakerCount =
+          result.caretakerCount;
 
-      // ❌ REMOVED: The SOS alarm no longer plays on the patient's phone.
-      // The caretaker's phone receives the SOS via the native WebSocket
-      // service and plays caretaker_sos.mp3 there.
+      final callableCaretaker =
+          result.firstCallableCaretaker;
 
       _finishRadiation();
 
       _showResult(
         success: true,
-        title: 'SOS Sent!',
-        message: caretakerCount == 1
-            ? 'Your caretaker has been alerted.\nPlease stay where you are.'
-            : '$caretakerCount caretakers have been alerted.\nPlease stay where you are.',
+        title: result.deliveredBySms
+            ? 'SOS SMS Sent!'
+            : 'SOS Sent!',
+        message: result.deliveredBySms
+            ? caretakerCount == 1
+            ? 'Your caretaker was contacted by SMS.\n'
+            'Please stay where you are.'
+            : '$caretakerCount caretakers were contacted by SMS.\n'
+            'Please stay where you are.'
+            : caretakerCount == 1
+            ? 'Your caretaker has been alerted.\n'
+            'Please stay where you are.'
+            : '$caretakerCount caretakers have been alerted.\n'
+            'Please stay where you are.',
         callContact: callableCaretaker,
       );
     } on SosDispatchException catch (error) {
-      if (!mounted) return;
+      if (!mounted) {
+        return;
+      }
+
       _finishRadiation();
+
       _showResult(
         success: false,
         title: 'SOS Not Sent',
         message: error.message,
       );
     } catch (error, stack) {
-      debugPrint('❌ SOS button error: $error');
+      debugPrint(
+        '❌ SOS button error: $error',
+      );
       debugPrint('$stack');
 
-      if (!mounted) return;
+      if (!mounted) {
+        return;
+      }
+
       _finishRadiation();
+
       _showResult(
         success: false,
         title: 'SOS Failed',
-        message: 'Could not send the SOS.\n'
+        message:
+        'Could not send the SOS.\n'
             'Please try again or call for help directly.',
       );
     } finally {
       if (mounted) {
-        setState(() => _isSending = false);
+        setState(() {
+          _isSending = false;
+        });
       }
     }
   }
 
-  Future<void> _callCaretaker(SosCaretakerContact caretaker) async {
-    final phone = caretaker.phoneNumber?.trim();
-    if (phone == null || phone.isEmpty) return;
+  // ══════════════════════════════════════════════════════════════
+  // PHONE CALL
+  // ══════════════════════════════════════════════════════════════
 
-    final uri = Uri(scheme: 'tel', path: phone);
-    await launchUrl(uri, mode: LaunchMode.externalApplication);
+  Future<void> _callCaretaker(
+      SosCaretakerContact caretaker,
+      ) async {
+    final phone =
+    caretaker.phoneNumber?.trim();
+
+    if (phone == null || phone.isEmpty) {
+      return;
+    }
+
+    final uri = Uri(
+      scheme: 'tel',
+      path: phone,
+    );
+
+    final launched = await launchUrl(
+      uri,
+      mode: LaunchMode.externalApplication,
+    );
+
+    if (!launched) {
+      debugPrint(
+        '❌ Could not open phone dialer',
+      );
+    }
   }
+
+  // ══════════════════════════════════════════════════════════════
+  // RESULT DIALOG
+  // ══════════════════════════════════════════════════════════════
 
   void _showResult({
     required bool success,
@@ -322,7 +510,9 @@ class _SosAlertButtonState extends State<SosAlertButton>
     required String message,
     SosCaretakerContact? callContact,
   }) {
-    if (!mounted) return;
+    if (!mounted) {
+      return;
+    }
 
     showDialog<void>(
       context: context,
@@ -333,27 +523,40 @@ class _SosAlertButtonState extends State<SosAlertButton>
           title: title,
           message: message,
           caretakerName: callContact?.name,
-          onCall: callContact == null ? null : () => _callCaretaker(callContact),
-          onDismiss: () {
-            // No need to stop SosSpeechService since it was never started
-            // on the patient's phone.
-          },
+          onCall: callContact == null
+              ? null
+              : () => _callCaretaker(callContact),
+          onDismiss: () {},
         );
       },
     );
   }
 
+  // ══════════════════════════════════════════════════════════════
+  // BUILD
+  // ══════════════════════════════════════════════════════════════
+
   int get _remainingSeconds {
-    if (!_isPressing) return 5;
-    final remaining = (1 - _fillController.value) * _holdDuration.inSeconds;
-    return math.max(1, remaining.ceil());
+    if (!_isPressing) {
+      return 5;
+    }
+
+    final remaining =
+        (1 - _fillController.value) *
+            _holdDuration.inSeconds;
+
+    return math.max(
+      1,
+      remaining.ceil(),
+    );
   }
 
   @override
   Widget build(BuildContext context) {
     return Semantics(
       button: true,
-      label: 'Emergency SOS. Press and hold for five seconds.',
+      label:
+      'Emergency SOS. Press and hold for five seconds.',
       child: Listener(
         behavior: HitTestBehavior.opaque,
         onPointerDown: (_) => _beginHold(),
@@ -361,7 +564,10 @@ class _SosAlertButtonState extends State<SosAlertButton>
         onPointerUp: (_) => _releaseHold(),
         onPointerCancel: (_) => _releaseHold(),
         child: AnimatedBuilder(
-          animation: Listenable.merge([_fillController, _waveController]),
+          animation: Listenable.merge([
+            _fillController,
+            _waveController,
+          ]),
           builder: (context, _) {
             return SizedBox(
               key: _buttonKey,
@@ -393,14 +599,26 @@ class _SosAlertButtonState extends State<SosAlertButton>
                     child: CircularProgressIndicator(
                       value: _fillController.value,
                       strokeWidth: 5,
-                      valueColor: const AlwaysStoppedAnimation(Colors.white),
-                      backgroundColor: Colors.white.withValues(alpha: 0.15),
+                      valueColor:
+                      const AlwaysStoppedAnimation(
+                        Colors.white,
+                      ),
+                      backgroundColor:
+                      Colors.white.withValues(
+                        alpha: 0.15,
+                      ),
                     ),
                   ),
                   AnimatedContainer(
-                    duration: const Duration(milliseconds: 80),
-                    width: _isPressing ? _buttonSize - 6 : _buttonSize,
-                    height: _isPressing ? _buttonSize - 6 : _buttonSize,
+                    duration: const Duration(
+                      milliseconds: 80,
+                    ),
+                    width: _isPressing
+                        ? _buttonSize - 6
+                        : _buttonSize,
+                    height: _isPressing
+                        ? _buttonSize - 6
+                        : _buttonSize,
                     decoration: BoxDecoration(
                       shape: BoxShape.circle,
                       color: _isSending
@@ -408,11 +626,18 @@ class _SosAlertButtonState extends State<SosAlertButton>
                           : const Color(0xFFCC0000),
                       boxShadow: [
                         BoxShadow(
-                          color: const Color(0xFFCC0000).withValues(
-                            alpha: _isPressing ? 0.75 : 0.50,
+                          color: const Color(0xFFCC0000)
+                              .withValues(
+                            alpha: _isPressing
+                                ? 0.75
+                                : 0.50,
                           ),
-                          blurRadius: _isPressing ? 32 : 18,
-                          spreadRadius: _isPressing ? 6 : 1,
+                          blurRadius: _isPressing
+                              ? 32
+                              : 18,
+                          spreadRadius: _isPressing
+                              ? 6
+                              : 1,
                         ),
                       ],
                     ),
@@ -421,14 +646,16 @@ class _SosAlertButtonState extends State<SosAlertButton>
                       child: SizedBox(
                         width: 26,
                         height: 26,
-                        child: CircularProgressIndicator(
+                        child:
+                        CircularProgressIndicator(
                           color: Colors.white,
                           strokeWidth: 2.5,
                         ),
                       ),
                     )
                         : Column(
-                      mainAxisAlignment: MainAxisAlignment.center,
+                      mainAxisAlignment:
+                      MainAxisAlignment.center,
                       children: [
                         const Icon(
                           Icons.sos_rounded,
@@ -440,10 +667,12 @@ class _SosAlertButtonState extends State<SosAlertButton>
                           _isPressing
                               ? '${_remainingSeconds}S'
                               : 'HOLD 5S',
-                          style: const TextStyle(
+                          style:
+                          const TextStyle(
                             color: Colors.white,
                             fontSize: 8,
-                            fontWeight: FontWeight.w900,
+                            fontWeight:
+                            FontWeight.w900,
                             letterSpacing: 1.1,
                           ),
                         ),
@@ -464,7 +693,8 @@ class _SosAlertButtonState extends State<SosAlertButton>
 // FULL-SCREEN RADIATION PAINTER
 // ══════════════════════════════════════════════════════════════
 
-class _ScreenRadiationPainter extends CustomPainter {
+class _ScreenRadiationPainter
+    extends CustomPainter {
   final Offset origin;
   final double progress;
 
@@ -474,10 +704,16 @@ class _ScreenRadiationPainter extends CustomPainter {
   });
 
   @override
-  void paint(Canvas canvas, Size size) {
-    if (progress <= 0) return;
+  void paint(
+      Canvas canvas,
+      Size size,
+      ) {
+    if (progress <= 0) {
+      return;
+    }
 
-    final linearProgress = progress.clamp(0.0, 1.0);
+    final linearProgress =
+    progress.clamp(0.0, 1.0);
 
     final corners = <Offset>[
       Offset.zero,
@@ -487,55 +723,92 @@ class _ScreenRadiationPainter extends CustomPainter {
     ];
 
     double maximumRadius = 0;
+
     for (final corner in corners) {
-      maximumRadius =
-          math.max(maximumRadius, (corner - origin).distance);
+      maximumRadius = math.max(
+        maximumRadius,
+        (corner - origin).distance,
+      );
     }
 
-    final currentRadius = maximumRadius * linearProgress;
+    final currentRadius =
+        maximumRadius * linearProgress;
 
     final radiationPaint = Paint()
       ..shader = RadialGradient(
         colors: [
-          const Color(0xFFCC0000).withValues(alpha: 0.30),
-          const Color(0xFFCC0000).withValues(alpha: 0.17),
-          const Color(0xFFCC0000).withValues(alpha: 0.04),
+          const Color(0xFFCC0000).withValues(
+            alpha: 0.30,
+          ),
+          const Color(0xFFCC0000).withValues(
+            alpha: 0.17,
+          ),
+          const Color(0xFFCC0000).withValues(
+            alpha: 0.04,
+          ),
           Colors.transparent,
         ],
-        stops: const [0.0, 0.45, 0.78, 1.0],
+        stops: const [
+          0.0,
+          0.45,
+          0.78,
+          1.0,
+        ],
       ).createShader(
         Rect.fromCircle(
           center: origin,
-          radius: math.max(currentRadius, 1),
+          radius: math.max(
+            currentRadius,
+            1,
+          ),
         ),
       );
 
-    canvas.drawCircle(origin, currentRadius, radiationPaint);
+    canvas.drawCircle(
+      origin,
+      currentRadius,
+      radiationPaint,
+    );
 
     final screenTint = Paint()
       ..color = const Color(0xFFCC0000).withValues(
         alpha: 0.08 * linearProgress,
       );
 
-    canvas.drawRect(Offset.zero & size, screenTint);
+    canvas.drawRect(
+      Offset.zero & size,
+      screenTint,
+    );
 
     for (int index = 0; index < 4; index++) {
       final delay = index * 0.14;
       final denominator = 1 - delay;
+
       final phase = denominator <= 0
           ? 0.0
-          : ((linearProgress - delay) / denominator).clamp(0.0, 1.0);
+          : ((linearProgress - delay) /
+          denominator)
+          .clamp(0.0, 1.0);
 
-      if (phase <= 0) continue;
+      if (phase <= 0) {
+        continue;
+      }
 
-      final ringRadius = maximumRadius * Curves.easeOut.transform(phase);
-      final opacity = (1 - phase).clamp(0.0, 1.0);
+      final ringRadius =
+          maximumRadius *
+              Curves.easeOut.transform(phase);
+
+      final opacity =
+      (1 - phase).clamp(0.0, 1.0);
 
       canvas.drawCircle(
         origin,
         ringRadius,
         Paint()
-          ..color = const Color(0xFFFF3030).withValues(alpha: opacity * 0.75)
+          ..color = const Color(0xFFFF3030)
+              .withValues(
+            alpha: opacity * 0.75,
+          )
           ..style = PaintingStyle.stroke
           ..strokeWidth = 3,
       );
@@ -543,8 +816,11 @@ class _ScreenRadiationPainter extends CustomPainter {
   }
 
   @override
-  bool shouldRepaint(covariant _ScreenRadiationPainter oldDelegate) {
-    return oldDelegate.origin != origin || oldDelegate.progress != progress;
+  bool shouldRepaint(
+      covariant _ScreenRadiationPainter oldDelegate,
+      ) {
+    return oldDelegate.origin != origin ||
+        oldDelegate.progress != progress;
   }
 }
 
@@ -565,10 +841,15 @@ class _RadioWave extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    if (progress <= 0) return const SizedBox.shrink();
+    if (progress <= 0) {
+      return const SizedBox.shrink();
+    }
 
-    final size = baseSize + maxExtra * progress;
-    final opacity = (1 - progress).clamp(0.0, 1.0);
+    final size =
+        baseSize + maxExtra * progress;
+
+    final opacity =
+    (1 - progress).clamp(0.0, 1.0);
 
     return Container(
       width: size,
@@ -576,7 +857,8 @@ class _RadioWave extends StatelessWidget {
       decoration: BoxDecoration(
         shape: BoxShape.circle,
         border: Border.all(
-          color: const Color(0xFFCC0000).withValues(alpha: opacity * 0.60),
+          color: const Color(0xFFCC0000)
+              .withValues(alpha: opacity * 0.60),
           width: 2.5,
         ),
       ),
@@ -607,8 +889,13 @@ class _SosResultDialog extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final color = success ? const Color(0xFF00C853) : AppColors.error;
-    final icon = success ? Icons.check_circle_rounded : Icons.error_rounded;
+    final color = success
+        ? const Color(0xFF00C853)
+        : AppColors.error;
+
+    final icon = success
+        ? Icons.check_circle_rounded
+        : Icons.error_rounded;
 
     return Dialog(
       backgroundColor: Colors.transparent,
@@ -637,20 +924,30 @@ class _SosResultDialog extends StatelessWidget {
               decoration: BoxDecoration(
                 shape: BoxShape.circle,
                 color: color.withValues(alpha: 0.12),
-                border: Border.all(color: color.withValues(alpha: 0.40)),
+                border: Border.all(
+                  color: color.withValues(alpha: 0.40),
+                ),
               ),
-              child: Icon(icon, color: color, size: 40),
+              child: Icon(
+                icon,
+                color: color,
+                size: 40,
+              ),
             ),
             const SizedBox(height: 18),
             Text(
               title,
-              style: AppTextStyles.h2.copyWith(color: Colors.white),
+              style: AppTextStyles.h2.copyWith(
+                color: Colors.white,
+              ),
               textAlign: TextAlign.center,
             ),
             const SizedBox(height: 10),
             Text(
               message,
-              style: AppTextStyles.bodyMedium.copyWith(color: Colors.white70),
+              style: AppTextStyles.bodyMedium.copyWith(
+                color: Colors.white70,
+              ),
               textAlign: TextAlign.center,
             ),
             if (onCall != null) ...[
@@ -660,7 +957,9 @@ class _SosResultDialog extends StatelessWidget {
                 height: 50,
                 child: OutlinedButton.icon(
                   onPressed: onCall,
-                  icon: const Icon(Icons.call_rounded),
+                  icon: const Icon(
+                    Icons.call_rounded,
+                  ),
                   label: Text(
                     caretakerName == null
                         ? 'Call Caretaker'
@@ -669,10 +968,14 @@ class _SosResultDialog extends StatelessWidget {
                   style: OutlinedButton.styleFrom(
                     foregroundColor: Colors.white,
                     side: BorderSide(
-                      color: Colors.white.withValues(alpha: 0.30),
+                      color:
+                      Colors.white.withValues(
+                        alpha: 0.30,
+                      ),
                     ),
                     shape: RoundedRectangleBorder(
-                      borderRadius: BorderRadius.circular(14),
+                      borderRadius:
+                      BorderRadius.circular(14),
                     ),
                   ),
                 ),
@@ -687,7 +990,8 @@ class _SosResultDialog extends StatelessWidget {
                   backgroundColor: color,
                   foregroundColor: Colors.white,
                   shape: RoundedRectangleBorder(
-                    borderRadius: BorderRadius.circular(14),
+                    borderRadius:
+                    BorderRadius.circular(14),
                   ),
                 ),
                 onPressed: () {

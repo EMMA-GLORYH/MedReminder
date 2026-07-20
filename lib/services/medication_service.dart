@@ -344,4 +344,45 @@ class MedicationService {
 
     return Medication.fromJson(data);
   }
+
+  Future<List<Medication>> getMedicationsForPatient(
+      String patientId,
+      ) async {
+    final caregiverId =
+        AuthService.instance.currentUser?.id;
+
+    if (caregiverId == null) {
+      throw Exception('Not logged in');
+    }
+
+    final relationship = await supabase
+        .from('care_relationships')
+        .select('can_view_medications, status')
+        .eq('patient_id', patientId)
+        .eq('caregiver_id', caregiverId)
+        .eq('status', 'active')
+        .maybeSingle();
+
+    if (relationship == null ||
+        relationship['can_view_medications'] != true) {
+      throw Exception(
+        'You are not permitted to view this patient’s medications.',
+      );
+    }
+
+    final data = await supabase
+        .from('medications')
+        .select()
+        .eq('patient_id', patientId)
+        .eq('is_active', true)
+        .order('created_at', ascending: false);
+
+    return (data as List)
+        .map(
+          (row) => Medication.fromJson(
+        Map<String, dynamic>.from(row as Map),
+      ),
+    )
+        .toList();
+  }
 }

@@ -2,12 +2,17 @@
 
 package com.example.mar
 
+import android.Manifest
 import android.app.AlarmManager
 import android.app.PendingIntent
 import android.content.Context
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.os.Build
+import android.telephony.SmsManager
 import android.util.Log
+import androidx.core.app.ActivityCompat
+import androidx.core.content.ContextCompat
 import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.plugin.common.MethodCall
@@ -22,15 +27,20 @@ class MainActivity : FlutterActivity() {
         private const val SCANNER_ROUTE_CHANNEL =
             "medication_scanner_route"
 
-        // ✅ NEW: SOS Realtime channel name.
-        // Must match SosRealtimeNativeService._channel in Dart.
         private const val SOS_REALTIME_CHANNEL =
             "sos_realtime_background"
+
+        private const val SOS_SMS_CHANNEL =
+            "sos_sms_fallback"
 
         private const val ACTION_OPEN_SCANNER =
             "com.example.mar.OPEN_SCANNER"
 
-        private const val LOG_TAG = "MAR_ALERTS"
+        private const val LOG_TAG =
+            "MAR_ALERTS"
+
+        private const val SMS_PERMISSION_REQUEST_CODE =
+            7001
 
         const val MODE_MEDICATION_DUE =
             "medication_due"
@@ -51,14 +61,16 @@ class MainActivity : FlutterActivity() {
             "none"
     }
 
-    private var scannerRouteChannel: MethodChannel? = null
+    private var scannerRouteChannel: MethodChannel? =
+        null
 
     /*
-     * When Android starts MainActivity from a terminated state, Dart may
-     * not have registered its MethodChannel handler yet. Keep the payload
-     * here until Flutter explicitly requests it.
+     * When Android launches MainActivity from a terminated state,
+     * Flutter may not yet have registered its route handler. Keep the
+     * scanner payload until Flutter explicitly requests it.
      */
-    private var pendingScannerPayload: String? = null
+    private var pendingScannerPayload: String? =
+        null
 
     override fun configureFlutterEngine(
         flutterEngine: FlutterEngine
@@ -67,15 +79,9 @@ class MainActivity : FlutterActivity() {
 
         configureAlertChannel(flutterEngine)
         configureScannerRouteChannel(flutterEngine)
-
-        // ✅ NEW: SOS Realtime background WebSocket control.
         configureSosRealtimeChannel(flutterEngine)
+        configureSosSmsChannel(flutterEngine)
 
-        /*
-         * Do not immediately call Flutter for a cold-start intent.
-         * Flutter may not yet have initialized LocalNotificationService,
-         * the global navigator, or its MethodChannel handler.
-         */
         extractScannerPayload(intent)?.let { payload ->
             pendingScannerPayload = payload
 
@@ -86,17 +92,16 @@ class MainActivity : FlutterActivity() {
         }
     }
 
-    /*
-     * Called when MainActivity already exists because the activity uses
-     * singleTop and the alarm sends another OPEN_SCANNER intent.
-     */
-    override fun onNewIntent(intent: Intent) {
+    override fun onNewIntent(
+        intent: Intent
+    ) {
         super.onNewIntent(intent)
 
         setIntent(intent)
 
-        val payload = extractScannerPayload(intent)
-            ?: return
+        val payload =
+            extractScannerPayload(intent)
+                ?: return
 
         pendingScannerPayload = payload
 
@@ -109,7 +114,7 @@ class MainActivity : FlutterActivity() {
     }
 
     // ══════════════════════════════════════════════════════════════
-    // FLUTTER ALERT METHOD CHANNEL
+    // MEDICATION ALERT CHANNEL
     // ══════════════════════════════════════════════════════════════
 
     private fun configureAlertChannel(
@@ -128,7 +133,9 @@ class MainActivity : FlutterActivity() {
 
                     "cancelAlarm" -> {
                         val alarmId =
-                            call.argument<Number>("alarmId")
+                            call.argument<Number>(
+                                "alarmId"
+                            )
                                 ?.toInt()
                                 ?: 0
 
@@ -153,7 +160,7 @@ class MainActivity : FlutterActivity() {
             } catch (error: Exception) {
                 Log.e(
                     LOG_TAG,
-                    "Method channel error for ${call.method}",
+                    "Alert method-channel error for ${call.method}",
                     error
                 )
 
@@ -168,7 +175,7 @@ class MainActivity : FlutterActivity() {
     }
 
     // ══════════════════════════════════════════════════════════════
-    // SCANNER ROUTE METHOD CHANNEL
+    // SCANNER ROUTE CHANNEL
     // ══════════════════════════════════════════════════════════════
 
     private fun configureScannerRouteChannel(
@@ -181,7 +188,8 @@ class MainActivity : FlutterActivity() {
             channel.setMethodCallHandler { call, result ->
                 when (call.method) {
                     "getInitialScannerPayload" -> {
-                        val payload = pendingScannerPayload
+                        val payload =
+                            pendingScannerPayload
 
                         if (!payload.isNullOrBlank()) {
                             pendingScannerPayload = null
@@ -203,13 +211,74 @@ class MainActivity : FlutterActivity() {
         }
     }
 
+    private fun extractScannerPayload(
+        sourceIntent: Intent?
+    ): String? {
+        if (sourceIntent?.action != ACTION_OPEN_SCANNER) {
+            return null
+        }
+
+        return sourceIntent
+            .getStringExtra("payload")
+            ?.trim()
+            ?.takeIf {
+                it.isNotBlank()
+            }
+    }
+
+    private fun dispatchPendingScannerPayload() {
+        val payload =
+            pendingScannerPayload
+                ?.takeIf {
+                    it.isNotBlank()
+                }
+                ?: return
+
+        val channel =
+            scannerRouteChannel
+                ?: return
+
+        channel.invokeMethod(
+            "openScanner",
+            payload,
+            object : MethodChannel.Result {
+                override fun success(
+                    result: Any?
+                ) {
+                    if (pendingScannerPayload == payload) {
+                        pendingScannerPayload = null
+                    }
+
+                    Log.d(
+                        LOG_TAG,
+                        "Scanner payload forwarded to Flutter"
+                    )
+                }
+
+                override fun error(
+                    errorCode: String,
+                    errorMessage: String?,
+                    errorDetails: Any?
+                ) {
+                    Log.e(
+                        LOG_TAG,
+                        "Flutter rejected scanner payload: " +
+                                "$errorCode, $errorMessage"
+                    )
+                }
+
+                override fun notImplemented() {
+                    Log.w(
+                        LOG_TAG,
+                        "Flutter scanner route handler is not ready"
+                    )
+                }
+            }
+        )
+    }
+
     // ══════════════════════════════════════════════════════════════
-    // SOS REALTIME BACKGROUND CHANNEL ✅ NEW
-    //
-    // Flutter calls startSosRealtime to launch SosRealtimeService,
-    // which maintains a native OkHttp WebSocket to Supabase Realtime.
-    // When a new SOS INSERT arrives, SosRealtimeService fires
-    // TtsSpeakService directly — no Flutter needed.
+    // SOS REALTIME CHANNEL
     // ══════════════════════════════════════════════════════════════
 
     private fun configureSosRealtimeChannel(
@@ -223,17 +292,30 @@ class MainActivity : FlutterActivity() {
                 when (call.method) {
                     "startSosRealtime" -> {
                         val caregiverId =
-                            call.argument<String>("caregiverId")
+                            call.argument<String>(
+                                "caregiverId"
+                            )
                                 ?.trim()
                                 .orEmpty()
 
                         val supabaseUrl =
-                            call.argument<String>("supabaseUrl")
+                            call.argument<String>(
+                                "supabaseUrl"
+                            )
                                 ?.trim()
                                 .orEmpty()
 
                         val supabaseAnonKey =
-                            call.argument<String>("supabaseAnonKey")
+                            call.argument<String>(
+                                "supabaseAnonKey"
+                            )
+                                ?.trim()
+                                .orEmpty()
+
+                        val accessToken =
+                            call.argument<String>(
+                                "accessToken"
+                            )
                                 ?.trim()
                                 .orEmpty()
 
@@ -264,20 +346,12 @@ class MainActivity : FlutterActivity() {
                             return@setMethodCallHandler
                         }
 
-                        // ✅ Read the user's session JWT that Dart now sends.
-                        // Row Level Security needs this on the socket so the
-                        // caretaker only receives their own SOS alerts.
-                        val accessToken =
-                            call.argument<String>("accessToken")
-                                ?.trim()
-                                .orEmpty()
-
                         SosRealtimeService.start(
                             context = this,
                             caregiverId = caregiverId,
                             supabaseUrl = supabaseUrl,
                             supabaseAnonKey = supabaseAnonKey,
-                            accessToken = accessToken   // ✅ 5th parameter
+                            accessToken = accessToken
                         )
 
                         Log.d(
@@ -321,62 +395,192 @@ class MainActivity : FlutterActivity() {
         }
     }
 
-    private fun extractScannerPayload(
-        sourceIntent: Intent?
-    ): String? {
-        if (sourceIntent?.action != ACTION_OPEN_SCANNER) {
-            return null
-        }
+    // ══════════════════════════════════════════════════════════════
+    // SOS SMS FALLBACK CHANNEL
+    // ══════════════════════════════════════════════════════════════
 
-        return sourceIntent
-            .getStringExtra("payload")
-            ?.trim()
-            ?.takeIf { it.isNotBlank() }
-    }
+    private fun configureSosSmsChannel(
+        flutterEngine: FlutterEngine
+    ) {
+        MethodChannel(
+            flutterEngine.dartExecutor.binaryMessenger,
+            SOS_SMS_CHANNEL
+        ).setMethodCallHandler { call, result ->
+            try {
+                when (call.method) {
+                    "requestSmsPermission" -> {
+                        if (hasSmsPermission()) {
+                            result.success(true)
+                        } else {
+                            ActivityCompat.requestPermissions(
+                                this,
+                                arrayOf(
+                                    Manifest.permission.SEND_SMS
+                                ),
+                                SMS_PERMISSION_REQUEST_CODE
+                            )
 
-    private fun dispatchPendingScannerPayload() {
-        val payload = pendingScannerPayload
-            ?.takeIf { it.isNotBlank() }
-            ?: return
-
-        val channel = scannerRouteChannel
-            ?: return
-
-        channel.invokeMethod(
-            "openScanner",
-            payload,
-            object : MethodChannel.Result {
-                override fun success(result: Any?) {
-                    if (pendingScannerPayload == payload) {
-                        pendingScannerPayload = null
+                            /*
+                             * Android permission requests are asynchronous.
+                             * The caller should retry after the user grants
+                             * permission.
+                             */
+                            result.success(false)
+                        }
                     }
 
-                    Log.d(
-                        LOG_TAG,
-                        "Scanner payload forwarded to Flutter"
-                    )
-                }
+                    "sendSosSms" -> {
+                        if (!hasSmsPermission()) {
+                            result.error(
+                                "SMS_PERMISSION_DENIED",
+                                "SMS permission is required to send an SOS fallback message",
+                                null
+                            )
+                            return@setMethodCallHandler
+                        }
 
-                override fun error(
-                    errorCode: String,
-                    errorMessage: String?,
-                    errorDetails: Any?
-                ) {
-                    Log.e(
-                        LOG_TAG,
-                        "Flutter rejected scanner payload: " +
-                                "$errorCode, $errorMessage"
-                    )
-                }
+                        val recipients =
+                            call.argument<List<String>>(
+                                "recipients"
+                            )
+                                .orEmpty()
+                                .map {
+                                    it.trim()
+                                }
+                                .filter {
+                                    it.isNotEmpty()
+                                }
+                                .distinct()
 
-                override fun notImplemented() {
-                    Log.w(
-                        LOG_TAG,
-                        "Flutter scanner route handler is not ready"
-                    )
+                        val message =
+                            call.argument<String>(
+                                "message"
+                            )
+                                ?.trim()
+                                .orEmpty()
+
+                        if (recipients.isEmpty()) {
+                            result.error(
+                                "INVALID_RECIPIENTS",
+                                "At least one SMS recipient is required",
+                                null
+                            )
+                            return@setMethodCallHandler
+                        }
+
+                        if (message.isBlank()) {
+                            result.error(
+                                "INVALID_MESSAGE",
+                                "SMS message cannot be empty",
+                                null
+                            )
+                            return@setMethodCallHandler
+                        }
+
+                        val sentCount =
+                            sendSosSms(
+                                recipients = recipients,
+                                message = message
+                            )
+
+                        result.success(sentCount)
+                    }
+
+                    else -> {
+                        result.notImplemented()
+                    }
                 }
+            } catch (error: SecurityException) {
+                Log.e(
+                    LOG_TAG,
+                    "SMS permission was not granted",
+                    error
+                )
+
+                result.error(
+                    "SMS_PERMISSION_DENIED",
+                    "SMS permission is required to send an SOS fallback message",
+                    null
+                )
+            } catch (error: Exception) {
+                Log.e(
+                    LOG_TAG,
+                    "SOS SMS channel error",
+                    error
+                )
+
+                result.error(
+                    "SMS_SEND_ERROR",
+                    error.message
+                        ?: "Could not send SOS SMS",
+                    null
+                )
             }
-        )
+        }
+    }
+
+    private fun hasSmsPermission(): Boolean {
+        return ContextCompat.checkSelfPermission(
+            this,
+            Manifest.permission.SEND_SMS
+        ) == PackageManager.PERMISSION_GRANTED
+    }
+
+    private fun sendSosSms(
+        recipients: List<String>,
+        message: String
+    ): Int {
+        @Suppress("DEPRECATION")
+        val smsManager =
+            SmsManager.getDefault()
+
+        var sentCount = 0
+
+        for (phoneNumber in recipients) {
+            try {
+                val parts =
+                    smsManager.divideMessage(message)
+
+                if (parts.size <= 1) {
+                    smsManager.sendTextMessage(
+                        phoneNumber,
+                        null,
+                        message,
+                        null,
+                        null
+                    )
+                } else {
+                    smsManager.sendMultipartTextMessage(
+                        phoneNumber,
+                        null,
+                        ArrayList(parts),
+                        null,
+                        null
+                    )
+                }
+
+                sentCount++
+
+                Log.d(
+                    LOG_TAG,
+                    "SOS SMS queued for $phoneNumber"
+                )
+            } catch (error: Exception) {
+                Log.e(
+                    LOG_TAG,
+                    "Could not send SOS SMS to $phoneNumber",
+                    error
+                )
+            }
+        }
+
+        if (sentCount == 0) {
+            throw IllegalStateException(
+                "No SOS SMS could be queued"
+            )
+        }
+
+        return sentCount
     }
 
     // ══════════════════════════════════════════════════════════════
@@ -524,8 +728,7 @@ class MainActivity : FlutterActivity() {
 
                     Log.w(
                         LOG_TAG,
-                        "Exact alarm permission unavailable; " +
-                                "using inexact fallback"
+                        "Exact alarm permission unavailable; using fallback"
                     )
                 }
 
@@ -643,16 +846,29 @@ class MainActivity : FlutterActivity() {
                 this,
                 TtsSpeakService::class.java
             ).apply {
-                action = TtsSpeakService.ACTION_START
+                action =
+                    TtsSpeakService.ACTION_START
 
                 putExtra("message", message)
                 putExtra("payload", payload)
                 putExtra("alertMode", alertMode)
-                putExtra("soundResource", soundResource)
+                putExtra(
+                    "soundResource",
+                    soundResource
+                )
                 putExtra("loopSound", loopSound)
-                putExtra("launchScanner", launchScanner)
-                putExtra("vibrationMode", vibrationMode)
-                putExtra("ttsRepeatCount", ttsRepeatCount)
+                putExtra(
+                    "launchScanner",
+                    launchScanner
+                )
+                putExtra(
+                    "vibrationMode",
+                    vibrationMode
+                )
+                putExtra(
+                    "ttsRepeatCount",
+                    ttsRepeatCount
+                )
             }
 
         Log.d(
@@ -745,15 +961,13 @@ class MainActivity : FlutterActivity() {
     }
 
     // ══════════════════════════════════════════════════════════════
-    // BACKWARD-COMPATIBLE DEFAULTS
+    // DEFAULTS
     // ══════════════════════════════════════════════════════════════
 
     private fun defaultSoundResource(
         alertMode: String
     ): String {
-        return when (
-            alertMode.trim().lowercase()
-        ) {
+        return when (alertMode.trim().lowercase()) {
             MODE_PRIOR_REMINDER ->
                 "prior_reminder"
 
@@ -768,9 +982,7 @@ class MainActivity : FlutterActivity() {
     private fun defaultLoopSound(
         alertMode: String
     ): Boolean {
-        return when (
-            alertMode.trim().lowercase()
-        ) {
+        return when (alertMode.trim().lowercase()) {
             MODE_PRIOR_REMINDER -> false
             MODE_CARETAKER_SOS -> true
             else -> true
@@ -781,9 +993,7 @@ class MainActivity : FlutterActivity() {
         alertMode: String,
         payload: String
     ): Boolean {
-        return alertMode
-            .trim()
-            .lowercase() ==
+        return alertMode.trim().lowercase() ==
                 MODE_MEDICATION_DUE &&
                 payload.isNotBlank()
     }
@@ -791,9 +1001,7 @@ class MainActivity : FlutterActivity() {
     private fun defaultVibrationMode(
         alertMode: String
     ): String {
-        return when (
-            alertMode.trim().lowercase()
-        ) {
+        return when (alertMode.trim().lowercase()) {
             MODE_PRIOR_REMINDER ->
                 VIBRATION_FIVE_PULSES
 

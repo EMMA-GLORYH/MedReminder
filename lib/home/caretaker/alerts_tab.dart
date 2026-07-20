@@ -14,7 +14,7 @@ import '../../theme/app_text_styles.dart';
 import '../../widgets/loaders/skeleton_loader.dart';
 
 class AlertsTab extends StatefulWidget {
-  const AlertsTab({super.key});
+  const AlertsTab({super.key, required String patientId, required String patientName});
 
   @override
   State<AlertsTab> createState() => _AlertsTabState();
