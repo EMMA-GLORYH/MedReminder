@@ -39,7 +39,6 @@ class _SosAlertButtonState extends State<SosAlertButton>
 
   Timer? _holdTimer;
   Timer? _holdHapticTimer;
-  Stopwatch? _holdStopwatch;
 
   bool _isPressing = false;
   bool _isSending = false;
@@ -91,7 +90,6 @@ class _SosAlertButtonState extends State<SosAlertButton>
   void dispose() {
     _holdTimer?.cancel();
     _holdHapticTimer?.cancel();
-    _holdStopwatch?.stop();
     _removeRadiationOverlay();
 
     _fillController.dispose();
@@ -106,27 +104,19 @@ class _SosAlertButtonState extends State<SosAlertButton>
 
   Future<bool> _ensureSmsPermission() async {
     try {
-      final granted =
-      await _smsChannel.invokeMethod<bool>(
+      final granted = await _smsChannel.invokeMethod<bool>(
         'requestSmsPermission',
       );
 
       return granted == true;
     } on MissingPluginException catch (error) {
-      debugPrint(
-        '⚠️ SMS native channel is unavailable: $error',
-      );
+      debugPrint('⚠️ SMS native channel is unavailable: $error');
       return false;
     } on PlatformException catch (error) {
-      debugPrint(
-        '⚠️ Could not request SMS permission: '
-            '${error.message}',
-      );
+      debugPrint('⚠️ Could not request SMS permission: ${error.message}');
       return false;
     } catch (error, stack) {
-      debugPrint(
-        '⚠️ SMS permission request failed: $error',
-      );
+      debugPrint('⚠️ SMS permission request failed: $error');
       debugPrint('$stack');
       return false;
     }
@@ -145,10 +135,8 @@ class _SosAlertButtonState extends State<SosAlertButton>
 
     _holdTimer?.cancel();
     _holdHapticTimer?.cancel();
-    _holdStopwatch?.stop();
 
     _triggeredThisHold = false;
-    _holdStopwatch = Stopwatch()..start();
 
     setState(() {
       _isPressing = true;
@@ -171,38 +159,15 @@ class _SosAlertButtonState extends State<SosAlertButton>
       },
     );
 
-    _armHoldTimer(_holdDuration);
-  }
+    // Single timer to trigger SOS after 5 seconds
+    _holdTimer = Timer(_holdDuration, () {
+      if (!_isPressing || _isSending || _triggeredThisHold) {
+        return;
+      }
 
-  void _armHoldTimer(Duration delay) {
-    _holdTimer?.cancel();
-
-    _holdTimer = Timer(
-      delay,
-          () {
-        if (!_isPressing ||
-            _isSending ||
-            _triggeredThisHold) {
-          return;
-        }
-
-        final elapsed =
-            _holdStopwatch?.elapsed ??
-                Duration.zero;
-
-        if (elapsed < _holdDuration) {
-          _armHoldTimer(
-            _holdDuration - elapsed,
-          );
-          return;
-        }
-
-        _triggeredThisHold = true;
-        _holdStopwatch?.stop();
-
-        unawaited(_triggerSos());
-      },
-    );
+      _triggeredThisHold = true;
+      unawaited(_triggerSos());
+    });
   }
 
   void _releaseHold() {
@@ -212,7 +177,6 @@ class _SosAlertButtonState extends State<SosAlertButton>
 
     _holdTimer?.cancel();
     _holdHapticTimer?.cancel();
-    _holdStopwatch?.stop();
 
     setState(() {
       _isPressing = false;
@@ -226,9 +190,7 @@ class _SosAlertButtonState extends State<SosAlertButton>
       _fillController
           .animateBack(
         0,
-        duration: const Duration(
-          milliseconds: 250,
-        ),
+        duration: const Duration(milliseconds: 250),
         curve: Curves.easeOut,
       )
           .then((_) {
@@ -241,25 +203,18 @@ class _SosAlertButtonState extends State<SosAlertButton>
     }
   }
 
-  void _handlePointerMove(
-      PointerMoveEvent event,
-      ) {
+  void _handlePointerMove(PointerMoveEvent event) {
     if (!_isPressing || _isSending) {
       return;
     }
 
-    final renderObject =
-    _buttonKey.currentContext?.findRenderObject();
+    final renderObject = _buttonKey.currentContext?.findRenderObject();
 
-    if (renderObject is! RenderBox ||
-        !renderObject.hasSize) {
+    if (renderObject is! RenderBox || !renderObject.hasSize) {
       return;
     }
 
-    final topLeft =
-    renderObject.localToGlobal(
-      Offset.zero,
-    );
+    final topLeft = renderObject.localToGlobal(Offset.zero);
 
     final bounds = Rect.fromLTWH(
       topLeft.dx,
@@ -280,19 +235,14 @@ class _SosAlertButtonState extends State<SosAlertButton>
   void _showRadiationOverlay() {
     _removeRadiationOverlay();
 
-    final renderObject =
-    _buttonKey.currentContext?.findRenderObject();
+    final renderObject = _buttonKey.currentContext?.findRenderObject();
 
-    if (renderObject is! RenderBox ||
-        !renderObject.hasSize) {
+    if (renderObject is! RenderBox || !renderObject.hasSize) {
       return;
     }
 
-    final buttonCenter =
-    renderObject.localToGlobal(
-      renderObject.size.center(
-        Offset.zero,
-      ),
+    final buttonCenter = renderObject.localToGlobal(
+      renderObject.size.center(Offset.zero),
     );
 
     final overlayState = Overlay.of(
@@ -340,18 +290,6 @@ class _SosAlertButtonState extends State<SosAlertButton>
 
   // ══════════════════════════════════════════════════════════════
   // SOS DISPATCH
-  //
-  // The patient's phone does not play the SOS alarm.
-  //
-  // SosService:
-  // - tries Supabase Realtime first;
-  // - falls back to native SMS if online dispatch fails;
-  // - sends SMS to all cached eligible caretaker numbers.
-  //
-  // The caretaker phone:
-  // - receives Realtime when online;
-  // - receives MAR-SOS SMS when the SMS fallback is used;
-  // - starts TtsSpeakService with caretaker_sos.mp3.
   // ══════════════════════════════════════════════════════════════
 
   Future<void> _triggerSos() async {
@@ -361,7 +299,6 @@ class _SosAlertButtonState extends State<SosAlertButton>
 
     _holdTimer?.cancel();
     _holdHapticTimer?.cancel();
-    _holdStopwatch?.stop();
 
     HapticFeedback.heavyImpact();
 
@@ -380,53 +317,36 @@ class _SosAlertButtonState extends State<SosAlertButton>
       });
     }
 
-    /*
-     * Request SMS permission before sending. If the permission dialog is
-     * displayed, the current send attempt may still use the online path.
-     * The user should grant this permission before testing offline fallback.
-     */
-    final smsPermissionGranted =
-    await _ensureSmsPermission();
+    final smsPermissionGranted = await _ensureSmsPermission();
 
     if (!smsPermissionGranted) {
       debugPrint(
-        '⚠️ SMS permission is not granted. '
-            'Online SOS will still be attempted.',
+        '⚠️ SMS permission is not granted. Online SOS will still be attempted.',
       );
     }
 
     try {
-      final result =
-      await SosService.instance.sendSos();
+      final result = await SosService.instance.sendSos();
 
       if (!mounted) {
         return;
       }
 
-      final caretakerCount =
-          result.caretakerCount;
-
-      final callableCaretaker =
-          result.firstCallableCaretaker;
+      final caretakerCount = result.caretakerCount;
+      final callableCaretaker = result.firstCallableCaretaker;
 
       _finishRadiation();
 
       _showResult(
         success: true,
-        title: result.deliveredBySms
-            ? 'SOS SMS Sent!'
-            : 'SOS Sent!',
+        title: result.deliveredBySms ? 'SOS SMS Sent!' : 'SOS Sent!',
         message: result.deliveredBySms
             ? caretakerCount == 1
-            ? 'Your caretaker was contacted by SMS.\n'
-            'Please stay where you are.'
-            : '$caretakerCount caretakers were contacted by SMS.\n'
-            'Please stay where you are.'
+            ? 'Your caretaker was contacted by SMS.\nPlease stay where you are.'
+            : '$caretakerCount caretakers were contacted by SMS.\nPlease stay where you are.'
             : caretakerCount == 1
-            ? 'Your caretaker has been alerted.\n'
-            'Please stay where you are.'
-            : '$caretakerCount caretakers have been alerted.\n'
-            'Please stay where you are.',
+            ? 'Your caretaker has been alerted.\nPlease stay where you are.'
+            : '$caretakerCount caretakers have been alerted.\nPlease stay where you are.',
         callContact: callableCaretaker,
       );
     } on SosDispatchException catch (error) {
@@ -442,9 +362,7 @@ class _SosAlertButtonState extends State<SosAlertButton>
         message: error.message,
       );
     } catch (error, stack) {
-      debugPrint(
-        '❌ SOS button error: $error',
-      );
+      debugPrint('❌ SOS button error: $error');
       debugPrint('$stack');
 
       if (!mounted) {
@@ -457,8 +375,7 @@ class _SosAlertButtonState extends State<SosAlertButton>
         success: false,
         title: 'SOS Failed',
         message:
-        'Could not send the SOS.\n'
-            'Please try again or call for help directly.',
+        'Could not send the SOS.\nPlease try again or call for help directly.',
       );
     } finally {
       if (mounted) {
@@ -473,11 +390,8 @@ class _SosAlertButtonState extends State<SosAlertButton>
   // PHONE CALL
   // ══════════════════════════════════════════════════════════════
 
-  Future<void> _callCaretaker(
-      SosCaretakerContact caretaker,
-      ) async {
-    final phone =
-    caretaker.phoneNumber?.trim();
+  Future<void> _callCaretaker(SosCaretakerContact caretaker) async {
+    final phone = caretaker.phoneNumber?.trim();
 
     if (phone == null || phone.isEmpty) {
       return;
@@ -494,9 +408,7 @@ class _SosAlertButtonState extends State<SosAlertButton>
     );
 
     if (!launched) {
-      debugPrint(
-        '❌ Could not open phone dialer',
-      );
+      debugPrint('❌ Could not open phone dialer');
     }
   }
 
@@ -523,9 +435,7 @@ class _SosAlertButtonState extends State<SosAlertButton>
           title: title,
           message: message,
           caretakerName: callContact?.name,
-          onCall: callContact == null
-              ? null
-              : () => _callCaretaker(callContact),
+          onCall: callContact == null ? null : () => _callCaretaker(callContact),
           onDismiss: () {},
         );
       },
@@ -541,22 +451,16 @@ class _SosAlertButtonState extends State<SosAlertButton>
       return 5;
     }
 
-    final remaining =
-        (1 - _fillController.value) *
-            _holdDuration.inSeconds;
+    final remaining = (1 - _fillController.value) * _holdDuration.inSeconds;
 
-    return math.max(
-      1,
-      remaining.ceil(),
-    );
+    return math.max(1, remaining.ceil());
   }
 
   @override
   Widget build(BuildContext context) {
     return Semantics(
       button: true,
-      label:
-      'Emergency SOS. Press and hold for five seconds.',
+      label: 'Emergency SOS. Press and hold for five seconds.',
       child: Listener(
         behavior: HitTestBehavior.opaque,
         onPointerDown: (_) => _beginHold(),
@@ -599,45 +503,28 @@ class _SosAlertButtonState extends State<SosAlertButton>
                     child: CircularProgressIndicator(
                       value: _fillController.value,
                       strokeWidth: 5,
-                      valueColor:
-                      const AlwaysStoppedAnimation(
+                      valueColor: const AlwaysStoppedAnimation(
                         Colors.white,
                       ),
-                      backgroundColor:
-                      Colors.white.withValues(
+                      backgroundColor: Colors.white.withValues(
                         alpha: 0.15,
                       ),
                     ),
                   ),
                   AnimatedContainer(
-                    duration: const Duration(
-                      milliseconds: 80,
-                    ),
-                    width: _isPressing
-                        ? _buttonSize - 6
-                        : _buttonSize,
-                    height: _isPressing
-                        ? _buttonSize - 6
-                        : _buttonSize,
+                    duration: const Duration(milliseconds: 80),
+                    width: _isPressing ? _buttonSize - 6 : _buttonSize,
+                    height: _isPressing ? _buttonSize - 6 : _buttonSize,
                     decoration: BoxDecoration(
                       shape: BoxShape.circle,
-                      color: _isSending
-                          ? Colors.orange
-                          : const Color(0xFFCC0000),
+                      color: _isSending ? Colors.orange : const Color(0xFFCC0000),
                       boxShadow: [
                         BoxShadow(
-                          color: const Color(0xFFCC0000)
-                              .withValues(
-                            alpha: _isPressing
-                                ? 0.75
-                                : 0.50,
+                          color: const Color(0xFFCC0000).withValues(
+                            alpha: _isPressing ? 0.75 : 0.50,
                           ),
-                          blurRadius: _isPressing
-                              ? 32
-                              : 18,
-                          spreadRadius: _isPressing
-                              ? 6
-                              : 1,
+                          blurRadius: _isPressing ? 32 : 18,
+                          spreadRadius: _isPressing ? 6 : 1,
                         ),
                       ],
                     ),
@@ -646,16 +533,14 @@ class _SosAlertButtonState extends State<SosAlertButton>
                       child: SizedBox(
                         width: 26,
                         height: 26,
-                        child:
-                        CircularProgressIndicator(
+                        child: CircularProgressIndicator(
                           color: Colors.white,
                           strokeWidth: 2.5,
                         ),
                       ),
                     )
                         : Column(
-                      mainAxisAlignment:
-                      MainAxisAlignment.center,
+                      mainAxisAlignment: MainAxisAlignment.center,
                       children: [
                         const Icon(
                           Icons.sos_rounded,
@@ -664,15 +549,11 @@ class _SosAlertButtonState extends State<SosAlertButton>
                         ),
                         const SizedBox(height: 2),
                         Text(
-                          _isPressing
-                              ? '${_remainingSeconds}S'
-                              : 'HOLD 5S',
-                          style:
-                          const TextStyle(
+                          _isPressing ? '${_remainingSeconds}S' : 'HOLD 5S',
+                          style: const TextStyle(
                             color: Colors.white,
                             fontSize: 8,
-                            fontWeight:
-                            FontWeight.w900,
+                            fontWeight: FontWeight.w900,
                             letterSpacing: 1.1,
                           ),
                         ),
