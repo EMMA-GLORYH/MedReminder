@@ -192,7 +192,7 @@ class _AddMedicationScreenState extends State<AddMedicationScreen> {
         pillColor: _pillColor!,
         pillShape: _pillShape!,
         pillImageUrl: imageUrl,
-        notes: _notesCtrl.text.trim().isEmpty ? null : _notesCtrl.text.trim(),
+        notes: _notesCtrl.text.trim().isEmpty ? null : _notesCtrl.text.trim(), patientId: '',
       );
 
       // 3. Cache locally for instant access

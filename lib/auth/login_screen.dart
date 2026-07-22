@@ -1,12 +1,14 @@
 // lib/screens/auth/login_screen.dart
 
 import 'package:flutter/material.dart';
+import 'package:flutter_svg/flutter_svg.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 import '../services/auth_router.dart';
 import '../services/auth_service.dart';
 import '../theme/app_colors.dart';
 import '../theme/app_text_styles.dart';
 import '../widgets/snackbar/app_snackbar.dart';
+import 'forgot_password_screen.dart';
 import 'signup_screen.dart';
 
 class LoginScreen extends StatefulWidget {
@@ -144,35 +146,26 @@ class _LoginScreenState extends State<LoginScreen> {
                       children: [
                         const SizedBox(height: 8),
 
-                        // ── Logo ──────────────────────────────
-                        Center(
-                          child: Container(
-                            width: 72,
-                            height: 72,
-                            decoration: BoxDecoration(
-                              shape: BoxShape.circle,
-                              color: Colors.white,
-                              boxShadow: [
-                                BoxShadow(
-                                  color: AppColors.primary.withOpacity(0.35),
-                                  blurRadius: 20,
-                                  offset: const Offset(0, 6),
-                                ),
-                              ],
-                            ),
-                            child: const Icon(
-                              Icons.medication_rounded,
-                              size: 40,
-                              color: AppColors.secondary,
-                            ),
-                          ),
-                        ),
+                        // // ── Logo ──────────────────────────────
+                        // Center(
+                        //   child: SvgPicture.asset(
+                        //     'assets/images/MedReminder_Logo.svg',
+                        //     width: 80,
+                        //     height: 80,
+                        //     fit: BoxFit.contain,
+                        //     placeholderBuilder: (context) => const Icon(
+                        //       Icons.medication_rounded,
+                        //       size: 80,
+                        //       color: AppColors.secondary,
+                        //     ),
+                        //   ),
+                        // ),
 
                         const SizedBox(height: 16),
 
-                        // ── Headline — "Back" removed ─────────
+                        // ── Headline ──────────────────────────
                         Text(
-                          'Welcome',
+                          'Log into MedReminder',
                           style: AppTextStyles.h1.copyWith(
                             color: Colors.white,
                             fontWeight: FontWeight.bold,
@@ -192,8 +185,6 @@ class _LoginScreenState extends State<LoginScreen> {
                         const SizedBox(height: 24),
 
                         // ── Email field ───────────────────────
-                        // ✅ FIX: White background + dark text so
-                        // the typed content and icon are visible
                         _SolidTextField(
                           controller: _emailController,
                           hint: 'User Name',
@@ -246,16 +237,14 @@ class _LoginScreenState extends State<LoginScreen> {
                                     },
                                     activeColor: AppColors.primary,
                                     checkColor: Colors.white,
-                                    fillColor:
-                                    WidgetStateProperty.resolveWith(
+                                    fillColor: WidgetStateProperty.resolveWith(
                                           (states) {
                                         if (states.contains(
                                           WidgetState.selected,
                                         )) {
                                           return AppColors.primary;
                                         }
-                                        return Colors.white
-                                            .withOpacity(0.85);
+                                        return Colors.white.withOpacity(0.85);
                                       },
                                     ),
                                     side: BorderSide(
@@ -288,13 +277,17 @@ class _LoginScreenState extends State<LoginScreen> {
                             ),
                             TextButton(
                               onPressed: () {
-                                // TODO: implement forgot password
+                                Navigator.push(
+                                  context,
+                                  MaterialPageRoute(
+                                    builder: (_) => const ForgotPasswordScreen(),
+                                  ),
+                                );
                               },
                               style: TextButton.styleFrom(
                                 padding: EdgeInsets.zero,
                                 minimumSize: Size.zero,
-                                tapTargetSize:
-                                MaterialTapTargetSize.shrinkWrap,
+                                tapTargetSize: MaterialTapTargetSize.shrinkWrap,
                               ),
                               child: Text(
                                 'Forgot Password?',
@@ -404,9 +397,8 @@ class _LoginScreenState extends State<LoginScreen> {
                                     height: 28,
                                     child: CircularProgressIndicator(
                                       strokeWidth: 2,
-                                      valueColor:
-                                      AlwaysStoppedAnimation<Color>(
-                                        Colors.white,
+                                      valueColor: AlwaysStoppedAnimation<Color>(
+                                        Colors.grey,
                                       ),
                                     ),
                                   );
@@ -423,7 +415,6 @@ class _LoginScreenState extends State<LoginScreen> {
                             ),
 
                             const SizedBox(width: 20),
-
 
                             // ── Apple ─────────────────────────
                             _SocialButton(
@@ -527,8 +518,6 @@ class _GlassCard extends StatelessWidget {
 
 // ══════════════════════════════════════════════════════════════
 // SOLID TEXT FIELD
-// White background + dark text so typed text and icons are
-// always clearly visible regardless of the background image.
 // ══════════════════════════════════════════════════════════════
 class _SolidTextField extends StatefulWidget {
   final TextEditingController controller;
@@ -559,7 +548,6 @@ class _SolidTextFieldState extends State<_SolidTextField> {
     return Container(
       decoration: BoxDecoration(
         borderRadius: BorderRadius.circular(14),
-        // ✅ Solid white background — always readable
         color: Colors.white,
         boxShadow: [
           BoxShadow(
@@ -573,7 +561,6 @@ class _SolidTextFieldState extends State<_SolidTextField> {
         controller: widget.controller,
         obscureText: widget.isPassword && _obscured,
         keyboardType: widget.keyboardType,
-        // ✅ Dark text — clearly visible on white background
         style: const TextStyle(
           color: Color(0xFF1A1A1A),
           fontSize: 15,
@@ -584,13 +571,11 @@ class _SolidTextFieldState extends State<_SolidTextField> {
         decoration: InputDecoration(
           hintText: widget.hint,
           hintStyle: TextStyle(
-            // ✅ Medium-dark hint text for clear placeholder
             color: Colors.grey.shade500,
             fontSize: 15,
           ),
           prefixIcon: Icon(
             widget.prefixIcon,
-            // ✅ Dark icon clearly visible on white background
             color: Colors.grey.shade600,
             size: 20,
           ),
@@ -734,7 +719,6 @@ class _SocialButton extends StatelessWidget {
         height: 56,
         decoration: BoxDecoration(
           shape: BoxShape.circle,
-          // ✅ White background so Google logo colours pop clearly
           color: Colors.white,
           boxShadow: [
             BoxShadow(

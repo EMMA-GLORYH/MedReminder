@@ -1,0 +1,26 @@
+<svg viewBox="0 0 800 800" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <clipPath id="capsuleClip">
+      <rect x="-84" y="-34" width="168" height="68" rx="34" ry="34"/>
+    </clipPath>
+  </defs>
+
+  <!-- Background squircle -->
+  <rect x="50" y="50" width="700" height="700" rx="176" ry="176" fill="#123D2B"/>
+
+  <!-- Monogram -->
+  <text x="400" y="545" text-anchor="middle"
+        font-family="Liberation Sans, Arial, sans-serif" font-weight="800"
+        font-size="392" letter-spacing="-14" fill="#D7E600">MR</text>
+
+  <!-- Capsule medallion -->
+  <circle cx="612" cy="192" r="122" fill="#D7E600"/>
+  <g transform="translate(612,192) rotate(-35)">
+    <g clip-path="url(#capsuleClip)">
+      <rect x="-84" y="-34" width="84" height="68" fill="#123D2B"/>
+      <rect x="0" y="-34" width="84" height="68" fill="#D7E600"/>
+    </g>
+    <rect x="-84" y="-34" width="168" height="68" rx="34" ry="34" fill="none" stroke="#123D2B" stroke-width="9"/>
+    <line x1="0" y1="-34" x2="0" y2="34" stroke="#123D2B" stroke-width="6"/>
+  </g>
+</svg>

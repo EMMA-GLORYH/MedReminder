@@ -1,6 +1,7 @@
 // lib/gui/splash_screen.dart
 
 import 'package:flutter/material.dart';
+import 'package:flutter_svg/flutter_svg.dart';
 
 import '../services/auth_router.dart';
 import '../theme/app_colors.dart';
@@ -15,21 +16,41 @@ class SplashScreen extends StatefulWidget {
   });
 
   @override
-  State<SplashScreen> createState() =>
-      _SplashScreenState();
+  State<SplashScreen> createState() => _SplashScreenState();
 }
 
-class _SplashScreenState extends State<SplashScreen> {
+class _SplashScreenState extends State<SplashScreen>
+    with SingleTickerProviderStateMixin {
   bool _routingStarted = false;
+
+  // ── Fade-in animation for the logo and text ──
+  late final AnimationController _animController;
+  late final Animation<double> _fadeAnimation;
+  late final Animation<double> _scaleAnimation;
 
   @override
   void initState() {
     super.initState();
 
-    /*
-     * Schedule initialization after the first frame so this screen already
-     * has a ModalRoute and is attached to the root navigator.
-     */
+    _animController = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 800),
+    );
+
+    _fadeAnimation = CurvedAnimation(
+      parent: _animController,
+      curve: Curves.easeIn,
+    );
+
+    _scaleAnimation = Tween<double>(begin: 0.85, end: 1.0).animate(
+      CurvedAnimation(
+        parent: _animController,
+        curve: Curves.easeOutBack,
+      ),
+    );
+
+    _animController.forward();
+
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (mounted) {
         _init();
@@ -37,48 +58,30 @@ class _SplashScreenState extends State<SplashScreen> {
     });
   }
 
+  @override
+  void dispose() {
+    _animController.dispose();
+    super.dispose();
+  }
+
   Future<void> _init() async {
-    if (_routingStarted) {
-      return;
-    }
+    if (_routingStarted) return;
 
     _routingStarted = true;
 
     if (widget.showBranding) {
-      await Future<void>.delayed(
-        const Duration(milliseconds: 1500),
-      );
+      await Future<void>.delayed(const Duration(milliseconds: 2000));
     }
 
-    if (!mounted) {
-      return;
-    }
+    if (!mounted) return;
 
-    /*
-     * A medication alarm may have pushed
-     * MedicationReminderScannerScreen above this splash screen.
-     *
-     * Calling AuthRouter while the splash route is not current could cause
-     * pushReplacement or another navigator operation to replace the active
-     * medication reminder. Wait until this splash route becomes current
-     * again, which happens after the reminder screen is closed.
-     */
     await _waitUntilSplashIsCurrent();
 
-    if (!mounted) {
-      return;
-    }
+    if (!mounted) return;
 
-    /*
-     * Wait one additional frame and verify again. This reduces the chance
-     * of racing with a scanner route that is being pushed by the native
-     * alarm during application startup.
-     */
     await WidgetsBinding.instance.endOfFrame;
 
-    if (!mounted) {
-      return;
-    }
+    if (!mounted) return;
 
     final route = ModalRoute.of(context);
 
@@ -91,15 +94,8 @@ class _SplashScreenState extends State<SplashScreen> {
     try {
       await AuthRouter.routeAfterAuth(context);
     } catch (error, stack) {
-      debugPrint(
-        '❌ Authentication routing failed: $error',
-      );
+      debugPrint('❌ Authentication routing failed: $error');
       debugPrint('$stack');
-
-      /*
-       * Allow another routing attempt if this screen is rebuilt or if the
-       * application invokes initialization again.
-       */
       _routingStarted = false;
     }
   }
@@ -107,27 +103,18 @@ class _SplashScreenState extends State<SplashScreen> {
   Future<void> _waitUntilSplashIsCurrent() async {
     while (mounted) {
       final route = ModalRoute.of(context);
+      if (route?.isCurrent == true) return;
 
-      if (route?.isCurrent == true) {
-        return;
-      }
-
-      /*
-       * The medication reminder is currently above the splash screen, or
-       * the splash route has not been attached yet. Do not perform login
-       * routing until it becomes safe.
-       */
-      await Future<void>.delayed(
-        const Duration(milliseconds: 250),
-      );
+      await Future<void>.delayed(const Duration(milliseconds: 250));
     }
   }
 
   @override
   Widget build(BuildContext context) {
+    // ── No-branding fallback (loading only) ──────────────────
     if (!widget.showBranding) {
       return const Scaffold(
-        backgroundColor: AppColors.background,
+        backgroundColor: Colors.white,
         body: Center(
           child: SizedBox(
             width: 40,
@@ -141,49 +128,96 @@ class _SplashScreenState extends State<SplashScreen> {
       );
     }
 
+    // ── Full branding splash ─────────────────────────────────
     return Scaffold(
-      backgroundColor: AppColors.secondary,
-      body: Center(
-        child: Column(
-          mainAxisAlignment: MainAxisAlignment.center,
-          children: <Widget>[
-            Container(
-              padding: const EdgeInsets.all(24),
-              decoration: const BoxDecoration(
-                color: AppColors.primary,
-                shape: BoxShape.circle,
+      backgroundColor: Colors.white,
+      body: SafeArea(
+        child: FadeTransition(
+          opacity: _fadeAnimation,
+          child: ScaleTransition(
+            scale: _scaleAnimation,
+            child: Center(
+              child: Column(
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: [
+                  const Spacer(flex: 2),
+
+                  // ── SVG Logo ─────────────────────────────
+                  SvgPicture.asset(
+                    'assets/images/MedReminder_Logo.svg',
+                    width: 120,
+                    height: 120,
+                    fit: BoxFit.contain,
+                    placeholderBuilder: (_) => Container(
+                      width: 120,
+                      height: 120,
+                      padding: const EdgeInsets.all(24),
+                      decoration: const BoxDecoration(
+                        color: AppColors.primary,
+                        shape: BoxShape.circle,
+                      ),
+                      child: const Icon(
+                        Icons.medication_rounded,
+                        size: 64,
+                        color: AppColors.secondary,
+                      ),
+                    ),
+                  ),
+
+                  const SizedBox(height: 28),
+
+                  // ── App name ──────────────────────────────
+                  Text(
+                    'MedReminder',
+                    style: AppTextStyles.displayLarge.copyWith(
+                      color: AppColors.secondary,
+                      fontWeight: FontWeight.w800,
+                      letterSpacing: 0.5,
+                    ),
+                  ),
+
+                  const SizedBox(height: 8),
+
+                  // ── Tagline ───────────────────────────────
+                  Text(
+                    'Your health, on schedule',
+                    style: AppTextStyles.bodyMedium.copyWith(
+                      color: AppColors.textSecondary,
+                      letterSpacing: 0.3,
+                    ),
+                  ),
+
+                  const Spacer(flex: 2),
+
+                  // ── Loading indicator at the bottom ───────
+                  Padding(
+                    padding: const EdgeInsets.only(bottom: 48),
+                    child: Column(
+                      children: [
+                        SizedBox(
+                          width: 36,
+                          height: 36,
+                          child: CircularProgressIndicator(
+                            color: AppColors.primary,
+                            strokeWidth: 3,
+                            backgroundColor:
+                            AppColors.primary.withOpacity(0.15),
+                          ),
+                        ),
+                        const SizedBox(height: 16),
+                        Text(
+                          'Loading...',
+                          style: AppTextStyles.bodySmall.copyWith(
+                            color: AppColors.textSecondary,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                ],
               ),
-              child: const Icon(
-                Icons.medication_rounded,
-                size: 64,
-                color: AppColors.secondary,
-              ),
             ),
-            const SizedBox(
-              height: 24,
-            ),
-            Text(
-              'MedReminder',
-              style: AppTextStyles.displayLarge.copyWith(
-                color: Colors.white,
-              ),
-            ),
-            const SizedBox(
-              height: 8,
-            ),
-            Text(
-              'Your health, on schedule',
-              style: AppTextStyles.bodyMedium.copyWith(
-                color: Colors.white70,
-              ),
-            ),
-            const SizedBox(
-              height: 40,
-            ),
-            const CircularProgressIndicator(
-              color: AppColors.primary,
-            ),
-          ],
+          ),
         ),
       ),
     );

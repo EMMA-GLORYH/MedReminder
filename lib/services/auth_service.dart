@@ -294,6 +294,27 @@ class AuthService {
     );
   }
 
+  // ── ADD THIS BELOW ──────────────────────────────────────────
+
+  Future<void> sendPasswordResetEmail({
+    required String email,
+  }) async {
+    final safeEmail = email.trim();
+
+    if (safeEmail.isEmpty) {
+      throw const AuthException(
+        'An email address is required.',
+      );
+    }
+
+    await supabase.auth.resetPasswordForEmail(
+      safeEmail,
+      redirectTo: 'io.supabase.medreminder://reset-password',
+    );
+
+    debugPrint('✅ Password reset email sent to $safeEmail');
+  }
+
   // ══════════════════════════════════════════════════════════════
   // CURRENT USER PROFILE
   // ══════════════════════════════════════════════════════════════

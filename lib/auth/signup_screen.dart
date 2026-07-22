@@ -1,7 +1,9 @@
 // lib/screens/auth/signup_screen.dart
 
 import 'package:flutter/material.dart';
+import 'package:flutter_svg/flutter_svg.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
+
 import '../services/auth_service.dart';
 import '../theme/app_colors.dart';
 import '../theme/app_text_styles.dart';
@@ -17,10 +19,9 @@ class SignupScreen extends StatefulWidget {
 }
 
 class _SignupScreenState extends State<SignupScreen> {
-  final _formKey          = GlobalKey<FormState>();
-  final _nameController   = TextEditingController();
-  final _emailController  = TextEditingController();
-  final _phoneController  = TextEditingController();
+  final _formKey = GlobalKey<FormState>();
+  final _nameController = TextEditingController();
+  final _emailController = TextEditingController();
   final _passwordController = TextEditingController();
 
   bool _isLoading = false;
@@ -29,7 +30,6 @@ class _SignupScreenState extends State<SignupScreen> {
   void dispose() {
     _nameController.dispose();
     _emailController.dispose();
-    _phoneController.dispose();
     _passwordController.dispose();
     super.dispose();
   }
@@ -39,20 +39,16 @@ class _SignupScreenState extends State<SignupScreen> {
     setState(() => _isLoading = true);
 
     try {
-      // Sign up — NO role passed here.
-      // The DB trigger creates the profile with null role.
-      // Role is collected on the OnboardingScreen after email verification.
       await AuthService.instance.signUpWithEmail(
-        email:       _emailController.text.trim(),
-        password:    _passwordController.text,
-        fullName:    _nameController.text.trim(),
-        phoneNumber: _phoneController.text.trim(),
-        role:        null,
+        email: _emailController.text.trim(),
+        password: _passwordController.text,
+        fullName: _nameController.text.trim(),
+        phoneNumber: null,
+        role: null,
       );
 
       if (!mounted) return;
 
-      // Show email-verification notice instead of routing immediately
       _showVerificationDialog();
     } on AuthException catch (e) {
       if (mounted) {
@@ -61,7 +57,10 @@ class _SignupScreenState extends State<SignupScreen> {
       }
     } catch (e) {
       if (mounted) {
-        AppSnackbar.error(context, 'Something went wrong. Please try again.');
+        AppSnackbar.error(
+          context,
+          'Something went wrong. Please try again.',
+        );
         setState(() => _isLoading = false);
       }
     }
@@ -71,10 +70,12 @@ class _SignupScreenState extends State<SignupScreen> {
     setState(() => _isLoading = true);
     try {
       await AuthService.instance.signInWithGoogle();
-      // Google OAuth → redirect → SplashScreen → AuthRouter → OnboardingScreen
     } catch (e) {
       if (mounted) {
-        AppSnackbar.error(context, 'Google sign-up failed. Please try again.');
+        AppSnackbar.error(
+          context,
+          'Google sign-up failed. Please try again.',
+        );
         setState(() => _isLoading = false);
       }
     }
@@ -82,22 +83,30 @@ class _SignupScreenState extends State<SignupScreen> {
 
   void _showVerificationDialog() {
     showDialog(
-      context:             context,
+      context: context,
       barrierDismissible: false,
       builder: (ctx) => AlertDialog(
-        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
+        shape: RoundedRectangleBorder(
+          borderRadius: BorderRadius.circular(20),
+        ),
         backgroundColor: AppColors.surface,
-        icon: const Icon(Icons.mark_email_read_rounded,
-            size: 52, color: AppColors.primary),
-        title: const Text('Verify your email',
-            textAlign: TextAlign.center),
+        icon: const Icon(
+          Icons.mark_email_read_rounded,
+          size: 52,
+          color: AppColors.primary,
+        ),
+        title: const Text(
+          'Verify your email',
+          textAlign: TextAlign.center,
+        ),
         content: Text(
           'We sent a confirmation link to\n'
               '${_emailController.text.trim()}\n\n'
               'Click the link in your email, then come back and sign in.',
-          textAlign:  TextAlign.center,
-          style: AppTextStyles.bodyMedium
-              .copyWith(color: AppColors.textSecondary),
+          textAlign: TextAlign.center,
+          style: AppTextStyles.bodyMedium.copyWith(
+            color: AppColors.textSecondary,
+          ),
         ),
         actionsAlignment: MainAxisAlignment.center,
         actions: [
@@ -106,12 +115,13 @@ class _SignupScreenState extends State<SignupScreen> {
               backgroundColor: AppColors.primary,
               foregroundColor: Colors.white,
               shape: RoundedRectangleBorder(
-                  borderRadius: BorderRadius.circular(12)),
+                borderRadius: BorderRadius.circular(12),
+              ),
               minimumSize: const Size(160, 48),
             ),
             onPressed: () {
               Navigator.of(ctx).pop();
-              Navigator.of(context).pop(); // back to LoginScreen
+              Navigator.of(context).pop();
             },
             child: const Text('Go to Sign In'),
           ),
@@ -125,11 +135,15 @@ class _SignupScreenState extends State<SignupScreen> {
     if (l.contains('already registered') || l.contains('user already')) {
       return 'This email is already registered. Try signing in instead.';
     }
-    if (l.contains('password')) return 'Password must be at least 6 characters.';
+    if (l.contains('password')) {
+      return 'Password must be at least 6 characters.';
+    }
     if (l.contains('invalid') && l.contains('email')) {
       return 'Please enter a valid email address.';
     }
-    if (l.contains('network')) return 'No internet connection.';
+    if (l.contains('network')) {
+      return 'No internet connection.';
+    }
     return message;
   }
 
@@ -139,8 +153,11 @@ class _SignupScreenState extends State<SignupScreen> {
       backgroundColor: AppColors.background,
       appBar: AppBar(
         backgroundColor: Colors.transparent,
-        elevation:       0,
-        title: Text('Create Account', style: AppTextStyles.titleMedium),
+        elevation: 0,
+        title: Text(
+          'Create Account',
+          style: AppTextStyles.titleMedium,
+        ),
         centerTitle: true,
       ),
       body: SafeArea(
@@ -151,56 +168,71 @@ class _SignupScreenState extends State<SignupScreen> {
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.stretch,
               children: [
-                // ── Icon ──
+
+                // ── SVG Logo ────────────────────────────────
                 Center(
-                  child: Container(
-                    padding: const EdgeInsets.all(20),
-                    decoration: BoxDecoration(
-                      color: AppColors.primary.withValues(alpha: 0.12),
-                      shape: BoxShape.circle,
+                  child: SvgPicture.asset(
+                    'assets/images/MedReminder_Logo.svg',
+                    width: 90,
+                    height: 90,
+                    fit: BoxFit.contain,
+                    placeholderBuilder: (_) => Container(
+                      padding: const EdgeInsets.all(20),
+                      decoration: BoxDecoration(
+                        color: AppColors.primary.withValues(alpha: 0.12),
+                        shape: BoxShape.circle,
+                      ),
+                      child: const Icon(
+                        Icons.medication_rounded,
+                        size: 44,
+                        color: AppColors.primary,
+                      ),
                     ),
-                    child: const Icon(Icons.medication_rounded,
-                        size: 44, color: AppColors.primary),
                   ),
                 ),
 
                 const SizedBox(height: 20),
 
+                // ── Headline ─────────────────────────────────
                 Text(
                   'Join MedReminder',
-                  style:     AppTextStyles.displayMedium,
+                  style: AppTextStyles.displayMedium,
                   textAlign: TextAlign.center,
                 ),
                 const SizedBox(height: 6),
                 Text(
                   'Create your account to get started',
-                  style: AppTextStyles.bodyMedium
-                      .copyWith(color: AppColors.textSecondary),
+                  style: AppTextStyles.bodyMedium.copyWith(
+                    color: AppColors.textSecondary,
+                  ),
                   textAlign: TextAlign.center,
                 ),
 
                 const SizedBox(height: 32),
 
-                // ── Fields ──
+                // ── Full Name ─────────────────────────────────
                 AppTextField(
                   controller: _nameController,
-                  label:      'Full Name',
-                  hint:       'John Doe',
+                  label: 'Full Name',
+                  hint: 'John Doe',
                   prefixIcon: Icons.person_outline,
-                  validator:  (v) => v == null || v.trim().isEmpty
-                      ? 'Name is required' : null,
+                  validator: (v) =>
+                  v == null || v.trim().isEmpty ? 'Name is required' : null,
                 ),
 
                 const SizedBox(height: 14),
 
+                // ── Email ─────────────────────────────────────
                 AppTextField(
-                  controller:   _emailController,
-                  label:        'Email',
-                  hint:         'name@example.com',
-                  prefixIcon:   Icons.email_outlined,
+                  controller: _emailController,
+                  label: 'Email',
+                  hint: 'name@example.com',
+                  prefixIcon: Icons.email_outlined,
                   keyboardType: TextInputType.emailAddress,
                   validator: (v) {
-                    if (v == null || v.trim().isEmpty) return 'Email is required';
+                    if (v == null || v.trim().isEmpty) {
+                      return 'Email is required';
+                    }
                     if (!v.contains('@')) return 'Invalid email';
                     return null;
                   },
@@ -208,22 +240,11 @@ class _SignupScreenState extends State<SignupScreen> {
 
                 const SizedBox(height: 14),
 
-                AppTextField(
-                  controller:   _phoneController,
-                  label:        'Phone Number',
-                  hint:         '+233 XX XXX XXXX',
-                  prefixIcon:   Icons.phone_outlined,
-                  keyboardType: TextInputType.phone,
-                  validator:    (v) => v == null || v.trim().isEmpty
-                      ? 'Phone is required for alerts' : null,
-                ),
-
-                const SizedBox(height: 14),
-
+                // ── Password ──────────────────────────────────
                 AppTextField(
                   controller: _passwordController,
-                  label:      'Password',
-                  hint:       'Minimum 6 characters',
+                  label: 'Password',
+                  hint: 'Minimum 6 characters',
                   prefixIcon: Icons.lock_outline,
                   isPassword: true,
                   validator: (v) {
@@ -233,29 +254,36 @@ class _SignupScreenState extends State<SignupScreen> {
                   },
                 ),
 
-                const SizedBox(height: 6),
+                const SizedBox(height: 12),
 
-                // Role hint — let user know role is chosen next
+                // ── Info banner ───────────────────────────────
                 Container(
                   padding: const EdgeInsets.symmetric(
-                      horizontal: 14, vertical: 10),
+                    horizontal: 14,
+                    vertical: 10,
+                  ),
                   decoration: BoxDecoration(
-                    color:        AppColors.primary.withValues(alpha: 0.08),
+                    color: AppColors.primary.withValues(alpha: 0.08),
                     borderRadius: BorderRadius.circular(10),
                     border: Border.all(
-                        color: AppColors.primary.withValues(alpha: 0.2)),
+                      color: AppColors.primary.withValues(alpha: 0.2),
+                    ),
                   ),
                   child: Row(
                     children: [
-                      Icon(Icons.info_outline_rounded,
-                          size: 16, color: AppColors.primary),
+                      Icon(
+                        Icons.info_outline_rounded,
+                        size: 16,
+                        color: AppColors.primary,
+                      ),
                       const SizedBox(width: 8),
                       Expanded(
                         child: Text(
                           'You\'ll choose your role (Patient / Caretaker) '
-                              'after verifying your email.',
-                          style: AppTextStyles.bodySmall
-                              .copyWith(color: AppColors.primary),
+                              'and add your phone number after verifying your email.',
+                          style: AppTextStyles.bodySmall.copyWith(
+                            color: AppColors.primary,
+                          ),
                         ),
                       ),
                     ],
@@ -264,31 +292,82 @@ class _SignupScreenState extends State<SignupScreen> {
 
                 const SizedBox(height: 28),
 
+                // ── Create Account button ─────────────────────
                 AppButton(
-                  label:     'Create Account',
+                  label: 'Create Account',
                   isLoading: _isLoading,
                   onPressed: _handleSignup,
                 ),
 
                 const SizedBox(height: 20),
 
-                Row(children: [
-                  const Expanded(child: Divider()),
-                  Padding(
-                    padding: const EdgeInsets.symmetric(horizontal: 14),
-                    child: Text('OR', style: AppTextStyles.labelSmall),
-                  ),
-                  const Expanded(child: Divider()),
-                ]),
+                // ── OR Divider ────────────────────────────────
+                Row(
+                  children: [
+                    const Expanded(child: Divider()),
+                    Padding(
+                      padding: const EdgeInsets.symmetric(horizontal: 14),
+                      child: Text('OR', style: AppTextStyles.labelSmall),
+                    ),
+                    const Expanded(child: Divider()),
+                  ],
+                ),
 
                 const SizedBox(height: 20),
 
-                AppButton(
-                  label:     'Sign up with Google',
-                  icon:      Icons.g_mobiledata,
-                  variant:   AppButtonVariant.outline,
+                // ── Google sign-up button ─────────────────────
+                // Uses the same icons8 Google logo as the login screen
+                OutlinedButton(
                   onPressed: _isLoading ? null : _handleGoogleSignup,
+                  style: OutlinedButton.styleFrom(
+                    minimumSize: const Size.fromHeight(52),
+                    side: BorderSide(color: AppColors.border),
+                    shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(12),
+                    ),
+                    backgroundColor: AppColors.surface,
+                  ),
+                  child: Row(
+                    mainAxisAlignment: MainAxisAlignment.center,
+                    children: [
+                      Image.network(
+                        'https://img.icons8.com/fluency/48/google-logo.png',
+                        width: 22,
+                        height: 22,
+                        fit: BoxFit.contain,
+                        loadingBuilder: (context, child, progress) {
+                          if (progress == null) return child;
+                          return const SizedBox(
+                            width: 22,
+                            height: 22,
+                            child: CircularProgressIndicator(
+                              strokeWidth: 2,
+                              color: AppColors.primary,
+                            ),
+                          );
+                        },
+                        errorBuilder: (_, __, ___) => const Text(
+                          'G',
+                          style: TextStyle(
+                            fontSize: 18,
+                            fontWeight: FontWeight.w800,
+                            color: Color(0xFF4285F4),
+                          ),
+                        ),
+                      ),
+                      const SizedBox(width: 10),
+                      Text(
+                        'Sign up with Google',
+                        style: AppTextStyles.titleSmall.copyWith(
+                          color: AppColors.textPrimary,
+                          fontWeight: FontWeight.w600,
+                        ),
+                      ),
+                    ],
+                  ),
                 ),
+
+                const SizedBox(height: 16),
               ],
             ),
           ),

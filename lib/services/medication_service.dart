@@ -40,7 +40,7 @@ class MedicationService {
     String? pillColor,
     String? pillShape,
     String? pillImageUrl,
-    String? notes,
+    String? notes, required String patientId,
   }) async {
     final userId = _requireUserId();
 

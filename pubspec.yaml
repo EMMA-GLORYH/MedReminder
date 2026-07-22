@@ -84,6 +84,7 @@ flutter:
 #    - assets/images/
      - assets/.env
      - assets/images/BG_Image.jpeg
+     - assets/images/MedReminder_Logo.svg
 
   # To add assets to your application, add an assets section, like this:
   # assets:
