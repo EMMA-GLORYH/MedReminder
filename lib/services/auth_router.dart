@@ -7,6 +7,7 @@ import 'package:mar/auth/login_screen.dart';
 import 'package:mar/auth/onboarding_screen.dart';
 import 'package:mar/home/caretaker_home_screen.dart';
 import 'package:mar/home/patient_home_screen.dart';
+import 'package:mar/auth/reset_password_screen.dart';
 import 'package:mar/services/auth_service.dart';
 
 class AuthRouter {
@@ -34,6 +35,39 @@ class AuthRouter {
       );
 
       return const LoginScreen();
+    }
+
+    // ── Password recovery session ────────────────────────────
+    //
+    // When the user taps the reset-password link in their email,
+    // Supabase creates a short-lived session with type "recovery".
+    // We must not route them to the dashboard in that state.
+    // Instead we push ResetPasswordScreen and let them set a new
+    // password before normal routing continues.
+    try {
+      final session = auth.currentSession;
+
+      if (session != null) {
+        // Supabase marks recovery sessions with the "recovery" type
+        // on the access token's AMR (Authentication Method Reference).
+        final amr = session.user.appMetadata['amr'];
+        final isRecoverySession =
+            amr is List && amr.any((e) => e.toString() == 'recovery') ||
+                // Fallback: some Supabase versions set this directly
+                session.user.appMetadata['recovery'] == true;
+
+        if (isRecoverySession) {
+          debugPrint(
+            '🔑 AuthRouter: Recovery session detected → ResetPasswordScreen',
+          );
+          return const ResetPasswordScreen();
+        }
+      }
+    } catch (error) {
+      // Non-critical — continue with normal routing if this check fails
+      debugPrint(
+        '⚠️ AuthRouter: Could not check recovery session: $error',
+      );
     }
 
     try {
@@ -74,8 +108,7 @@ class AuthRouter {
         return const OnboardingScreen();
       }
 
-      final role =
-      (profile.role ?? '').toLowerCase().trim();
+      final role = (profile.role ?? '').toLowerCase().trim();
 
       if (role == 'patient') {
         debugPrint(
@@ -227,7 +260,23 @@ class AuthRouter {
      * No await occurs between the final isCurrent check and this navigator
      * operation. Therefore, another Dart route cannot be pushed between
      * the safety check and pushAndRemoveUntil().
+     *
+     * ResetPasswordScreen is pushed normally (not with pushAndRemoveUntil)
+     * so the user can go back to login after resetting their password.
      */
+    if (destination is ResetPasswordScreen) {
+      navigator.push<void>(
+        MaterialPageRoute<void>(
+          builder: (_) => const ResetPasswordScreen(),
+        ),
+      );
+
+      debugPrint(
+        '✅ AuthRouter: Pushed ResetPasswordScreen',
+      );
+      return;
+    }
+
     navigator.pushAndRemoveUntil<void>(
       PageRouteBuilder<void>(
         transitionDuration: const Duration(

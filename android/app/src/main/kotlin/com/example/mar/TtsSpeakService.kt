@@ -96,6 +96,7 @@ class TtsSpeakService : Service(), TextToSpeech.OnInitListener {
 
     private var loopSound: Boolean = true
     private var launchScanner: Boolean = true
+    private var flashlightEnabled: Boolean = false
     private var ttsRepeatCount: Int = DEFAULT_TTS_REPEAT_COUNT
 
     private var isReady: Boolean = false
@@ -187,6 +188,12 @@ class TtsSpeakService : Service(), TextToSpeech.OnInitListener {
             ?.takeIf { it.isNotBlank() }
             ?: defaultVibrationMode(alertMode)
 
+        flashlightEnabled = if (intent?.hasExtra("flashlight") == true) {
+            intent.getBooleanExtra("flashlight", defaultFlashlightEnabled(alertMode))
+        } else {
+            defaultFlashlightEnabled(alertMode)
+        }
+
         ttsRepeatCount = intent
             ?.getIntExtra(
                 "ttsRepeatCount",
@@ -205,6 +212,7 @@ class TtsSpeakService : Service(), TextToSpeech.OnInitListener {
                     "loop=$loopSound, " +
                     "launchScanner=$launchScanner, " +
                     "vibration=$vibrationMode, " +
+                    "flashlight=$flashlightEnabled, " +
                     "ttsRepeats=$ttsRepeatCount"
         )
 
@@ -232,30 +240,38 @@ class TtsSpeakService : Service(), TextToSpeech.OnInitListener {
         startVibration()
 
         /*
-         * Flash physical LED for high-priority alerts:
-         * - Medication Due
-         * - Caretaker SOS
-         * - Caretaker Medication
+         * Flash physical LED for high-priority alerts when enabled
          */
-        if (alertMode == MODE_MEDICATION_DUE ||
-            alertMode == MODE_CARETAKER_SOS ||
-            alertMode == MODE_CARETAKER_MEDICATION) {
+        if (flashlightEnabled) {
             startFlashlightStrobe()
         }
 
         /*
-         * Medication and SOS use configured speech repetition.
-         * Caretaker medication alerts are TTS-only, so skip sound playback.
+         * MODE_CARETAKER_MEDICATION is TTS-only:
+         * - No MP3 playback
+         * - Continuous vibration
+         * - Flashlight strobe
+         * - No scanner launch
+         * - Stops after TTS completes
+         */
+        if (alertMode == MODE_CARETAKER_MEDICATION) {
+            if (ttsRepeatCount <= 0 || message.isBlank()) {
+                // No TTS message - just stop immediately
+                Log.w(LOG_TAG, "Caretaker medication alert has no TTS message - stopping")
+                stopEverything()
+                stopSelf()
+            } else {
+                startTts()
+            }
+            return START_STICKY
+        }
+
+        /*
+         * For other modes: use configured speech repetition.
          * If speech is not required or unavailable, skip to sound.
          */
         if (ttsRepeatCount <= 0 || message.isBlank()) {
-            if (alertMode != MODE_CARETAKER_MEDICATION) {
-                startSelectedSound()
-            } else {
-                // No TTS message, no sound - just stop
-                stopEverything()
-                stopSelf()
-            }
+            startSelectedSound()
         } else {
             startTts()
         }
@@ -280,14 +296,23 @@ class TtsSpeakService : Service(), TextToSpeech.OnInitListener {
                     break
                 }
             }
+            Log.d(LOG_TAG, "Camera initialized: cameraId=$cameraId")
         } catch (e: Exception) {
             Log.e(LOG_TAG, "Could not initialize camera flash", e)
         }
     }
 
     private fun startFlashlightStrobe() {
-        val targetCamId = cameraId ?: return
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M) return
+        val targetCamId = cameraId
+        if (targetCamId == null) {
+            Log.w(LOG_TAG, "No camera available for flashlight")
+            return
+        }
+
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M) {
+            Log.w(LOG_TAG, "Flashlight not supported on API < 23")
+            return
+        }
 
         flashRunnable = object : Runnable {
             override fun run() {
@@ -312,7 +337,10 @@ class TtsSpeakService : Service(), TextToSpeech.OnInitListener {
         if (targetCamId != null && Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
             try {
                 cameraManager?.setTorchMode(targetCamId, false)
-            } catch (_: Exception) {}
+                Log.d(LOG_TAG, "Flashlight stopped")
+            } catch (e: Exception) {
+                Log.e(LOG_TAG, "Error stopping flashlight", e)
+            }
         }
         isTorchOn = false
     }
@@ -480,6 +508,7 @@ class TtsSpeakService : Service(), TextToSpeech.OnInitListener {
              * Stop the service after TTS completes.
              */
             if (alertMode == MODE_CARETAKER_MEDICATION) {
+                Log.d(LOG_TAG, "Caretaker medication TTS finished - stopping service")
                 stopEverything()
                 stopSelf()
             } else {
@@ -494,6 +523,12 @@ class TtsSpeakService : Service(), TextToSpeech.OnInitListener {
 
     private fun startSelectedSound() {
         stopMediaPlayerOnly()
+
+        // Caretaker medication alerts skip MP3 playback entirely
+        if (alertMode == MODE_CARETAKER_MEDICATION) {
+            Log.d(LOG_TAG, "Skipping sound playback for caretaker medication alert")
+            return
+        }
 
         val requestedResourceName =
             normalizeResourceName(soundResource)
@@ -1072,8 +1107,8 @@ class TtsSpeakService : Service(), TextToSpeech.OnInitListener {
         mode: String,
         scannerPayload: String
     ): Boolean {
-        return mode.trim().lowercase() ==
-                MODE_MEDICATION_DUE &&
+        // Caretaker medication alerts never launch scanner
+        return mode.trim().lowercase() == MODE_MEDICATION_DUE &&
                 scannerPayload.isNotBlank()
     }
 
@@ -1092,6 +1127,17 @@ class TtsSpeakService : Service(), TextToSpeech.OnInitListener {
 
             else ->
                 VIBRATION_CONTINUOUS
+        }
+    }
+
+    private fun defaultFlashlightEnabled(
+        mode: String
+    ): Boolean {
+        return when (mode.trim().lowercase()) {
+            MODE_MEDICATION_DUE -> true
+            MODE_CARETAKER_SOS -> true
+            MODE_CARETAKER_MEDICATION -> true
+            else -> false
         }
     }
 }

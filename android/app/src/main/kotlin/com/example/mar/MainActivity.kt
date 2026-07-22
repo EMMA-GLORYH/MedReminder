@@ -7,6 +7,7 @@ import android.app.AlarmManager
 import android.app.PendingIntent
 import android.content.Context
 import android.content.Intent
+import android.content.SharedPreferences
 import android.content.pm.PackageManager
 import android.os.Build
 import android.telephony.SmsManager
@@ -45,6 +46,10 @@ class MainActivity : FlutterActivity() {
 
         private const val SMS_PERMISSION_REQUEST_CODE =
             7001
+
+        // ✅ NEW: SharedPreferences for tracking caretaker alerts
+        private const val CARETAKER_ALERTS_PREFS =
+            "caretaker_medication_alerts_prefs"
 
         const val MODE_MEDICATION_DUE =
             "medication_due"
@@ -425,11 +430,6 @@ class MainActivity : FlutterActivity() {
                                 SMS_PERMISSION_REQUEST_CODE
                             )
 
-                            /*
-                             * Android permission requests are asynchronous.
-                             * The caller should retry after the user grants
-                             * permission.
-                             */
                             result.success(false)
                         }
                     }
@@ -628,6 +628,11 @@ class MainActivity : FlutterActivity() {
                                 ?.trim()
                                 .orEmpty()
 
+                        val patientId =
+                            call.argument<String>("patientId")
+                                ?.trim()
+                                .orEmpty()
+
                         if (alertId.isBlank()) {
                             result.error(
                                 "INVALID_ARGUMENT",
@@ -637,7 +642,10 @@ class MainActivity : FlutterActivity() {
                             return@setMethodCallHandler
                         }
 
-                        cancelCaretakerMedicationAlarm(alertId)
+                        cancelCaretakerMedicationAlarm(
+                            alertId = alertId,
+                            patientId = patientId
+                        )
                         result.success(null)
                     }
 
@@ -647,16 +655,17 @@ class MainActivity : FlutterActivity() {
                                 ?.trim()
                                 .orEmpty()
 
-                        /*
-                         * Patient-wide cancellation will be completed after the
-                         * receiver/service storage is added.
-                         */
-                        Log.d(
-                            LOG_TAG,
-                            "Caretaker patient alert cancellation requested: "
-                                    + patientId
-                        )
+                        if (patientId.isBlank()) {
+                            result.error(
+                                "INVALID_ARGUMENT",
+                                "patientId is required",
+                                null
+                            )
+                            return@setMethodCallHandler
+                        }
 
+                        // ✅ IMPLEMENTED: Cancel all alerts for patient
+                        cancelAllCaretakerAlertsForPatient(patientId)
                         result.success(null)
                     }
 
@@ -685,6 +694,102 @@ class MainActivity : FlutterActivity() {
             }
         }
     }
+
+    // ══════════════════════════════════════════════════════════════
+    // CARETAKER ALERT TRACKING (SharedPreferences)
+    // ══════════════════════════════════════════════════════════════
+
+    private fun getCaretakerAlertsPrefs(): SharedPreferences {
+        return getSharedPreferences(
+            CARETAKER_ALERTS_PREFS,
+            Context.MODE_PRIVATE
+        )
+    }
+
+    /**
+     * Stores an alert ID under a patient's key so we can cancel
+     * all of a patient's alerts later.
+     */
+    private fun trackCaretakerAlert(
+        patientId: String,
+        alertId: String
+    ) {
+        val prefs = getCaretakerAlertsPrefs()
+        val existingSet =
+            prefs.getStringSet(patientId, emptySet())
+                ?.toMutableSet()
+                ?: mutableSetOf()
+
+        existingSet.add(alertId)
+
+        prefs.edit()
+            .putStringSet(patientId, existingSet)
+            .apply()
+
+        Log.d(
+            LOG_TAG,
+            "Tracked caretaker alert: patient=$patientId, alert=$alertId, " +
+                    "total=${existingSet.size}"
+        )
+    }
+
+    /**
+     * Removes a single alert ID from a patient's tracked set.
+     */
+    private fun untrackCaretakerAlert(
+        patientId: String,
+        alertId: String
+    ) {
+        if (patientId.isBlank()) return
+
+        val prefs = getCaretakerAlertsPrefs()
+        val existingSet =
+            prefs.getStringSet(patientId, emptySet())
+                ?.toMutableSet()
+                ?: return
+
+        existingSet.remove(alertId)
+
+        if (existingSet.isEmpty()) {
+            prefs.edit().remove(patientId).apply()
+        } else {
+            prefs.edit()
+                .putStringSet(patientId, existingSet)
+                .apply()
+        }
+
+        Log.d(
+            LOG_TAG,
+            "Untracked caretaker alert: patient=$patientId, alert=$alertId"
+        )
+    }
+
+    /**
+     * Returns all tracked alert IDs for a patient.
+     */
+    private fun getTrackedAlertsForPatient(
+        patientId: String
+    ): Set<String> {
+        return getCaretakerAlertsPrefs()
+            .getStringSet(patientId, emptySet())
+            ?: emptySet()
+    }
+
+    /**
+     * Clears all tracked alerts for a patient.
+     */
+    private fun clearTrackedAlertsForPatient(
+        patientId: String
+    ) {
+        getCaretakerAlertsPrefs()
+            .edit()
+            .remove(patientId)
+            .apply()
+    }
+
+    // ══════════════════════════════════════════════════════════════
+    // CARETAKER ALARM SCHEDULING / CANCELLATION
+    // ══════════════════════════════════════════════════════════════
 
     private fun scheduleCaretakerMedicationAlarm(
         alertId: String,
@@ -766,6 +871,9 @@ class MainActivity : FlutterActivity() {
                 }
             }
 
+            // ✅ Track this alert for patient-wide cancellation
+            trackCaretakerAlert(patientId, alertId)
+
             Log.d(
                 LOG_TAG,
                 "Caretaker medication TTS scheduled: " +
@@ -785,11 +893,14 @@ class MainActivity : FlutterActivity() {
                 scheduledForMillis,
                 pendingIntent
             )
+
+            trackCaretakerAlert(patientId, alertId)
         }
     }
 
     private fun cancelCaretakerMedicationAlarm(
-        alertId: String
+        alertId: String,
+        patientId: String = ""
     ) {
         val alarmManager =
             getSystemService(
@@ -815,9 +926,82 @@ class MainActivity : FlutterActivity() {
         alarmManager.cancel(pendingIntent)
         pendingIntent.cancel()
 
+        // ✅ Remove from tracking
+        if (patientId.isNotBlank()) {
+            untrackCaretakerAlert(patientId, alertId)
+        }
+
         Log.d(
             LOG_TAG,
             "Cancelled caretaker medication alert: $alertId"
+        )
+    }
+
+    /**
+     * ✅ NEW: Cancels ALL scheduled caretaker alerts for a patient.
+     * Called when a patient marks a dose as taken, or when unlinking.
+     */
+    private fun cancelAllCaretakerAlertsForPatient(
+        patientId: String
+    ) {
+        val trackedAlerts =
+            getTrackedAlertsForPatient(patientId)
+
+        if (trackedAlerts.isEmpty()) {
+            Log.d(
+                LOG_TAG,
+                "No tracked caretaker alerts for patient: $patientId"
+            )
+            return
+        }
+
+        val alarmManager =
+            getSystemService(
+                Context.ALARM_SERVICE
+            ) as AlarmManager
+
+        var cancelledCount = 0
+
+        for (alertId in trackedAlerts) {
+            try {
+                val intent = Intent(
+                    this,
+                    CaretakerMedicationAlarmReceiver::class.java
+                )
+
+                val requestCode =
+                    alertId.hashCode().absoluteValue
+
+                val pendingIntent =
+                    PendingIntent.getBroadcast(
+                        this,
+                        requestCode,
+                        intent,
+                        pendingIntentFlags()
+                    )
+
+                alarmManager.cancel(pendingIntent)
+                pendingIntent.cancel()
+
+                cancelledCount++
+            } catch (error: Exception) {
+                Log.e(
+                    LOG_TAG,
+                    "Could not cancel alert $alertId",
+                    error
+                )
+            }
+        }
+
+        // ✅ Clear all tracked alerts for this patient
+        clearTrackedAlertsForPatient(patientId)
+
+        // ✅ Also stop any currently playing alert
+        stopTtsService()
+
+        Log.d(
+            LOG_TAG,
+            "Cancelled $cancelledCount caretaker alerts for patient: $patientId"
         )
     }
 

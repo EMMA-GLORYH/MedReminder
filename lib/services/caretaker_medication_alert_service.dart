@@ -8,10 +8,11 @@ import 'package:flutter/services.dart';
 /// The native Android implementation receives these commands and
 /// schedules/plays TTS with vibration and flashlight:
 ///
-/// - No MP3 sound
-/// - ✅ Vibration enabled (continuous pattern)
-/// - ✅ Flashlight enabled (strobe pattern)
-/// - No patient scanner screen
+/// - ❌ No MP3 sound
+/// - ✅ Continuous vibration enabled
+/// - ✅ Flashlight strobe enabled
+/// - ❌ No patient scanner screen
+/// - ✅ High-priority notification
 ///
 /// The native channel name must match MainActivity.kt.
 class CaretakerMedicationAlertService {
@@ -33,6 +34,25 @@ class CaretakerMedicationAlertService {
   static const int _defaultTtsRepeatCount = 1;
 
   // ══════════════════════════════════════════════════════════════
+  // ALERT BEHAVIOR CONSTANTS
+  // ══════════════════════════════════════════════════════════════
+
+  /// No MP3 playback for caretaker medication alerts.
+  static const bool _playSound = false;
+
+  /// No looping since there's no sound.
+  static const bool _loopSound = false;
+
+  /// ✅ Continuous vibration to alert the caretaker.
+  static const String _vibrationMode = 'continuous';
+
+  /// ✅ Camera flashlight strobe for visibility.
+  static const bool _flashlight = true;
+
+  /// ❌ Never launch the patient scanner for caretaker alerts.
+  static const bool _launchScanner = false;
+
+  // ══════════════════════════════════════════════════════════════
   // SCHEDULE DUE-TIME CARETAKER MESSAGE
   // ══════════════════════════════════════════════════════════════
 
@@ -42,6 +62,12 @@ class CaretakerMedicationAlertService {
   ///
   /// "It is time for Elijah Emmanuel Hienwo to take the medication.
   /// Kindly monitor them."
+  ///
+  /// Alert includes:
+  /// - TTS announcement
+  /// - Continuous vibration
+  /// - Flashlight strobe
+  /// - High-priority notification
   Future<void> scheduleDueAlert({
     required String alertId,
     required String patientId,
@@ -95,6 +121,12 @@ class CaretakerMedicationAlertService {
   ///
   /// "The medication for Elijah Emmanuel Hienwo scheduled at 8:00 AM
   /// has not been taken. Please check on them."
+  ///
+  /// Alert includes:
+  /// - TTS announcement
+  /// - Continuous vibration
+  /// - Flashlight strobe
+  /// - High-priority notification
   Future<void> scheduleNotTakenAlert({
     required String alertId,
     required String patientId,
@@ -224,6 +256,11 @@ class CaretakerMedicationAlertService {
           'patientId': safePatientId,
         },
       );
+
+      debugPrint(
+        '🗑️ Cancelled all caretaker alerts for patient: '
+            '$safePatientId',
+      );
     } on MissingPluginException {
       debugPrint(
         '⚠️ Caretaker medication native channel is not '
@@ -245,11 +282,15 @@ class CaretakerMedicationAlertService {
   }
 
   /// Stops any currently speaking caretaker medication message.
+  ///
+  /// This also stops vibration and flashlight.
   Future<void> stopCurrentAlert() async {
     try {
       await _channel.invokeMethod<void>(
         'stopCaretakerMedicationAlert',
       );
+
+      debugPrint('🛑 Stopped current caretaker medication alert');
     } on MissingPluginException {
       debugPrint(
         '⚠️ Caretaker medication native channel is not '
@@ -328,6 +369,23 @@ class CaretakerMedicationAlertService {
           'message': message,
           'alertType': alertType,
           'ttsRepeatCount': safeRepeatCount,
+
+          // ══════════════════════════════════════════════════════
+          // ALERT BEHAVIOR (TTS + Vibration + Flashlight)
+          // ══════════════════════════════════════════════════════
+
+          // ❌ No MP3 sound
+          'playSound': _playSound,
+          'loopSound': _loopSound,
+
+          // ✅ Continuous vibration
+          'vibrationMode': _vibrationMode,
+
+          // ✅ Flashlight strobe
+          'flashlight': _flashlight,
+
+          // ❌ No scanner
+          'launchScanner': _launchScanner,
         },
       );
 
@@ -335,7 +393,9 @@ class CaretakerMedicationAlertService {
         '🗣️ Caretaker medication TTS scheduled: '
             'type=$alertType, '
             'patient=$patientName, '
-            'time=$scheduledFor',
+            'time=$scheduledFor, '
+            'vibration=$_vibrationMode, '
+            'flashlight=$_flashlight',
       );
     } on MissingPluginException {
       debugPrint(

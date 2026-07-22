@@ -9,6 +9,8 @@ import 'config/supabase_config.dart';
 import 'gui/splash_screen.dart';
 import 'localization/app_localizations.dart';
 import 'localization/locale_controller.dart';
+import '../auth/reset_password_screen.dart';
+import 'services/auth_service.dart';
 import 'services/local_notification_service.dart';
 import 'theme/app_theme.dart';
 
@@ -137,7 +139,7 @@ SupabaseClient get supabase => Supabase.instance.client;
 // ROOT APPLICATION
 // ══════════════════════════════════════════════════════════════
 
-class MyApp extends StatelessWidget {
+class MyApp extends StatefulWidget {
   final Object? startupError;
   final StackTrace? startupStack;
 
@@ -146,6 +148,79 @@ class MyApp extends StatelessWidget {
     this.startupError,
     this.startupStack,
   });
+
+  @override
+  State<MyApp> createState() => _MyAppState();
+}
+
+class _MyAppState extends State<MyApp> {
+  @override
+  void initState() {
+    super.initState();
+    _listenForAuthDeepLinks();
+  }
+
+  // ══════════════════════════════════════════════════════════════
+  // DEEP LINK AUTH LISTENER
+  //
+  // Listens for Supabase auth events triggered by deep links.
+  //
+  // When the user taps the password reset link in their email:
+  //   1. Android opens the app via io.supabase.medreminder://reset-password
+  //   2. Supabase SDK detects the token in the URL
+  //   3. It emits AuthChangeEvent.passwordRecovery
+  //   4. We navigate to ResetPasswordScreen
+  //
+  // This listener is safe to register even if Supabase failed to init —
+  // it is wrapped in a try/catch and will not crash the app.
+  // ══════════════════════════════════════════════════════════════
+
+  void _listenForAuthDeepLinks() {
+    try {
+      Supabase.instance.client.auth.onAuthStateChange.listen(
+            (AuthState data) {
+          final event = data.event;
+
+          debugPrint('🔐 Auth event received: ${event.name}');
+
+          if (event == AuthChangeEvent.passwordRecovery) {
+            debugPrint(
+              '🔑 Password recovery event — navigating to ResetPasswordScreen',
+            );
+
+            // Wait one frame to ensure navigatorKey is mounted
+            WidgetsBinding.instance.addPostFrameCallback((_) {
+              navigatorKey.currentState?.push(
+                MaterialPageRoute<void>(
+                  builder: (_) => const ResetPasswordScreen(),
+                ),
+              );
+            });
+          }
+
+          if (event == AuthChangeEvent.signedIn) {
+            debugPrint('✅ Auth deep link: user signed in');
+
+            // Sync any pending dose logs after OAuth sign-in via deep link
+            AuthService.instance.initializePendingDoseSync();
+          }
+        },
+        onError: (Object error, StackTrace stack) {
+          debugPrint('⚠️ Auth state listener error: $error');
+          debugPrint('$stack');
+        },
+      );
+
+      debugPrint('✅ Auth deep link listener registered');
+    } catch (error, stack) {
+      // Supabase may not be initialized if startup failed.
+      // This is safe to ignore — the app still works without the listener.
+      debugPrint(
+        '⚠️ Could not register auth deep link listener: $error',
+      );
+      debugPrint('$stack');
+    }
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -157,8 +232,7 @@ class MyApp extends StatelessWidget {
      * navigator.
      */
     return ValueListenableBuilder<Locale>(
-      valueListenable:
-      LocaleController.instance.notifier,
+      valueListenable: LocaleController.instance.notifier,
       builder: (
           BuildContext context,
           Locale locale,
@@ -172,23 +246,28 @@ class MyApp extends StatelessWidget {
           // Required by LocalNotificationService.
           navigatorKey: navigatorKey,
 
+          // ── Named routes ──────────────────────────────────
+          // Used by the password reset deep link handler above.
+          routes: <String, WidgetBuilder>{
+            '/reset-password': (_) => const ResetPasswordScreen(),
+          },
+
           /*
            * If Supabase failed, keep a valid root navigator and show an
            * error screen. A cached medication reminder can still be pushed
            * over this screen without authentication.
            */
-          home: startupError == null
+          home: widget.startupError == null
               ? const SplashScreen()
               : _StartupErrorScreen(
-            error: startupError!,
-            stackTrace: startupStack,
+            error: widget.startupError!,
+            stackTrace: widget.startupStack,
           ),
 
           locale: locale,
-          supportedLocales:
-          AppLocalizations.supportedLocales,
-          localizationsDelegates: const <
-              LocalizationsDelegate<dynamic>>[
+          supportedLocales: AppLocalizations.supportedLocales,
+          localizationsDelegates:
+          const <LocalizationsDelegate<dynamic>>[
             AppLocalizations.delegate,
             GlobalMaterialLocalizations.delegate,
             GlobalWidgetsLocalizations.delegate,
@@ -230,8 +309,7 @@ class _StartupErrorScreen extends StatelessWidget {
                 maxWidth: 520,
               ),
               child: Column(
-                mainAxisAlignment:
-                MainAxisAlignment.center,
+                mainAxisAlignment: MainAxisAlignment.center,
                 children: <Widget>[
                   Container(
                     width: 76,
@@ -248,9 +326,7 @@ class _StartupErrorScreen extends StatelessWidget {
                       size: 38,
                     ),
                   ),
-                  const SizedBox(
-                    height: 24,
-                  ),
+                  const SizedBox(height: 24),
                   const Text(
                     'The app could not finish starting',
                     textAlign: TextAlign.center,
@@ -260,9 +336,7 @@ class _StartupErrorScreen extends StatelessWidget {
                       fontWeight: FontWeight.bold,
                     ),
                   ),
-                  const SizedBox(
-                    height: 12,
-                  ),
+                  const SizedBox(height: 12),
                   const Text(
                     'Medication alarms that were already scheduled '
                         'can still alert you. Please check your connection '
@@ -274,16 +348,13 @@ class _StartupErrorScreen extends StatelessWidget {
                       height: 1.5,
                     ),
                   ),
-                  const SizedBox(
-                    height: 20,
-                  ),
+                  const SizedBox(height: 20),
                   Container(
                     width: double.infinity,
                     padding: const EdgeInsets.all(16),
                     decoration: BoxDecoration(
                       color: Colors.white,
-                      borderRadius:
-                      BorderRadius.circular(14),
+                      borderRadius: BorderRadius.circular(14),
                       border: Border.all(
                         color: const Color(0xFFE5E7EB),
                       ),

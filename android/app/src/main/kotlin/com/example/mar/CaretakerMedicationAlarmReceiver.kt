@@ -139,7 +139,8 @@ class CaretakerMedicationAlarmReceiver : BroadcastReceiver() {
             "Caretaker medication alert received: " +
                     "alertId=$alertId, " +
                     "type=$alertType, " +
-                    "patient=$patientName"
+                    "patient=$patientName, " +
+                    "message=$message"
         )
 
         val serviceIntent =
@@ -151,9 +152,13 @@ class CaretakerMedicationAlarmReceiver : BroadcastReceiver() {
                     TtsSpeakService.ACTION_START
 
                 /*
-                 * These values identify the caretaker medication alert.
-                 * TtsSpeakService must handle the caretaker medication mode
-                 * as TTS-only: no MP3, no vibration and no flashlight.
+                 * Caretaker medication alert configuration:
+                 * - TTS announcement (spoken message)
+                 * - Continuous vibration
+                 * - Camera flashlight strobe
+                 * - Visible high-priority notification
+                 * - NO MP3 playback
+                 * - NO scanner launch
                  */
                 putExtra(
                     "alertMode",
@@ -185,9 +190,16 @@ class CaretakerMedicationAlarmReceiver : BroadcastReceiver() {
                     false
                 )
 
+                // ✅ CHANGED: continuous vibration (was VIBRATION_NONE)
                 putExtra(
                     "vibrationMode",
-                    TtsSpeakService.VIBRATION_NONE
+                    TtsSpeakService.VIBRATION_CONTINUOUS
+                )
+
+                // ✅ NEW: enable camera flashlight strobe
+                putExtra(
+                    "flashlight",
+                    true
                 )
 
                 putExtra(
@@ -252,7 +264,8 @@ class CaretakerMedicationAlarmReceiver : BroadcastReceiver() {
 
             Log.d(
                 LOG_TAG,
-                "Caretaker medication TTS service started"
+                "Caretaker medication TTS service started " +
+                        "(vibration=continuous, flashlight=on)"
             )
         } catch (error: Exception) {
             Log.e(

@@ -29,6 +29,8 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
+    <!-- ✅ NEW: Foreground service for camera flashlight (Android 14+). -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CAMERA" />
 
     <!-- Location permissions for SOS reporting. -->
     <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
@@ -60,10 +62,32 @@
                 android:name="io.flutter.embedding.android.NormalTheme"
                 android:resource="@style/NormalTheme" />
 
+            <!-- App launcher -->
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
+
+            <!-- ✅ Deep link: Password reset redirect from Supabase email -->
+            <intent-filter android:autoVerify="true">
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data
+                    android:scheme="io.supabase.medreminder"
+                    android:host="reset-password" />
+            </intent-filter>
+
+            <!-- ✅ Deep link: Google OAuth / Supabase login callback -->
+            <intent-filter android:autoVerify="true">
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data
+                    android:scheme="io.supabase.medreminder"
+                    android:host="login-callback" />
+            </intent-filter>
+
         </activity>
 
         <meta-data
@@ -116,11 +140,12 @@
 
         <!--
             Handles TTS, MP3 playback, vibration and flashlight.
+            ✅ Added camera type for flashlight strobe (Android 14+ compliance).
         -->
         <service
             android:name=".TtsSpeakService"
             android:exported="false"
-            android:foregroundServiceType="mediaPlayback" />
+            android:foregroundServiceType="mediaPlayback|camera" />
 
         <!--
             Native Supabase Realtime monitoring for caretaker SOS alerts.
