@@ -36,6 +36,7 @@ class TtsSpeakService : Service(), TextToSpeech.OnInitListener {
         const val MODE_MEDICATION_DUE = "medication_due"
         const val MODE_PRIOR_REMINDER = "prior_reminder"
         const val MODE_CARETAKER_SOS = "caretaker_sos"
+        const val MODE_CARETAKER_MEDICATION = "caretaker_medication"
 
         const val VIBRATION_CONTINUOUS = "continuous"
         const val VIBRATION_FIVE_PULSES = "five_pulses"
@@ -210,8 +211,11 @@ class TtsSpeakService : Service(), TextToSpeech.OnInitListener {
         /*
          * Exact medication reminders launch the confirmation/scanner
          * automatically. SOS and prior reminders do not.
+         * Caretaker medication alerts never launch scanner.
          */
-        if (launchScanner && payload.isNotBlank()) {
+        if (launchScanner &&
+            payload.isNotBlank() &&
+            alertMode != MODE_CARETAKER_MEDICATION) {
             launchScannerScreen(payload)
         }
 
@@ -224,21 +228,34 @@ class TtsSpeakService : Service(), TextToSpeech.OnInitListener {
         stopVibration()
         stopFlashlight()
 
+        // Start vibration for all alert modes
         startVibration()
 
         /*
-         * Flash physical LED only for high-priority alerts (Medication Due & SOS).
+         * Flash physical LED for high-priority alerts:
+         * - Medication Due
+         * - Caretaker SOS
+         * - Caretaker Medication
          */
-        if (alertMode == MODE_MEDICATION_DUE || alertMode == MODE_CARETAKER_SOS) {
+        if (alertMode == MODE_MEDICATION_DUE ||
+            alertMode == MODE_CARETAKER_SOS ||
+            alertMode == MODE_CARETAKER_MEDICATION) {
             startFlashlightStrobe()
         }
 
         /*
          * Medication and SOS use configured speech repetition.
+         * Caretaker medication alerts are TTS-only, so skip sound playback.
          * If speech is not required or unavailable, skip to sound.
          */
         if (ttsRepeatCount <= 0 || message.isBlank()) {
-            startSelectedSound()
+            if (alertMode != MODE_CARETAKER_MEDICATION) {
+                startSelectedSound()
+            } else {
+                // No TTS message, no sound - just stop
+                stopEverything()
+                stopSelf()
+            }
         } else {
             startTts()
         }
@@ -314,11 +331,21 @@ class TtsSpeakService : Service(), TextToSpeech.OnInitListener {
         if (status != TextToSpeech.SUCCESS) {
             Log.e(
                 LOG_TAG,
-                "TTS initialization failed; starting fallback sound"
+                "TTS initialization failed"
             )
 
             shutdownTts()
-            startSelectedSound()
+
+            /*
+             * Caretaker medication alerts are TTS-only.
+             * If TTS fails, just stop the service.
+             */
+            if (alertMode == MODE_CARETAKER_MEDICATION) {
+                stopEverything()
+                stopSelf()
+            } else {
+                startSelectedSound()
+            }
             return
         }
 
@@ -420,7 +447,13 @@ class TtsSpeakService : Service(), TextToSpeech.OnInitListener {
             Log.e(LOG_TAG, "Could not start TTS speech")
 
             shutdownTts()
-            startSelectedSound()
+
+            if (alertMode == MODE_CARETAKER_MEDICATION) {
+                stopEverything()
+                stopSelf()
+            } else {
+                startSelectedSound()
+            }
         }
     }
 
@@ -441,7 +474,17 @@ class TtsSpeakService : Service(), TextToSpeech.OnInitListener {
             )
 
             shutdownTts()
-            startSelectedSound()
+
+            /*
+             * Caretaker medication alerts are TTS-only.
+             * Stop the service after TTS completes.
+             */
+            if (alertMode == MODE_CARETAKER_MEDICATION) {
+                stopEverything()
+                stopSelf()
+            } else {
+                startSelectedSound()
+            }
         }
     }
 
@@ -847,7 +890,8 @@ class TtsSpeakService : Service(), TextToSpeech.OnInitListener {
                             Intent.FLAG_ACTIVITY_SINGLE_TOP
 
                 if (launchScanner &&
-                    payload.isNotBlank()
+                    payload.isNotBlank() &&
+                    alertMode != MODE_CARETAKER_MEDICATION
                 ) {
                     action =
                         "com.example.mar.OPEN_SCANNER"
@@ -886,6 +930,9 @@ class TtsSpeakService : Service(), TextToSpeech.OnInitListener {
             MODE_CARETAKER_SOS ->
                 "URGENT PATIENT SOS"
 
+            MODE_CARETAKER_MEDICATION ->
+                "Patient Medication Alert"
+
             else ->
                 "Medication Reminder"
         }
@@ -896,6 +943,9 @@ class TtsSpeakService : Service(), TextToSpeech.OnInitListener {
 
             MODE_CARETAKER_SOS ->
                 "A patient needs urgent assistance"
+
+            MODE_CARETAKER_MEDICATION ->
+                "A patient's medication is due"
 
             else ->
                 "Time to take your medicine"
@@ -935,8 +985,8 @@ class TtsSpeakService : Service(), TextToSpeech.OnInitListener {
             .setVisibility(
                 NotificationCompat.VISIBILITY_PUBLIC
             )
-            .setOngoing(loopSound)
-            .setAutoCancel(!loopSound)
+            .setOngoing(loopSound && alertMode != MODE_CARETAKER_MEDICATION)
+            .setAutoCancel(!loopSound || alertMode == MODE_CARETAKER_MEDICATION)
             .setContentIntent(openPending)
             .addAction(
                 android.R.drawable.ic_media_pause,
@@ -948,6 +998,7 @@ class TtsSpeakService : Service(), TextToSpeech.OnInitListener {
          * Full-screen only belongs to exact medication reminders.
          * SOS alerts do not automatically open the scanner; they appear in
          * the caretaker Alerts tab and over the normal audible alert.
+         * Caretaker medication alerts never use full-screen.
          */
         if (alertMode == MODE_MEDICATION_DUE &&
             launchScanner &&
@@ -998,6 +1049,9 @@ class TtsSpeakService : Service(), TextToSpeech.OnInitListener {
             MODE_CARETAKER_SOS ->
                 "caretaker_sos"
 
+            MODE_CARETAKER_MEDICATION ->
+                "" // No sound for caretaker medication
+
             else ->
                 "alarm"
         }
@@ -1009,6 +1063,7 @@ class TtsSpeakService : Service(), TextToSpeech.OnInitListener {
         return when (mode.trim().lowercase()) {
             MODE_PRIOR_REMINDER -> false
             MODE_CARETAKER_SOS -> true
+            MODE_CARETAKER_MEDICATION -> false
             else -> true
         }
     }
@@ -1030,6 +1085,9 @@ class TtsSpeakService : Service(), TextToSpeech.OnInitListener {
                 VIBRATION_FIVE_PULSES
 
             MODE_CARETAKER_SOS ->
+                VIBRATION_CONTINUOUS
+
+            MODE_CARETAKER_MEDICATION ->
                 VIBRATION_CONTINUOUS
 
             else ->

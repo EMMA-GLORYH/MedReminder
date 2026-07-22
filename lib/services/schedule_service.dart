@@ -9,10 +9,6 @@ import 'auth_service.dart';
 import 'local_notification_service.dart';
 
 /// Single source of truth for a scheduled dose.
-///
-/// [patientId] is optional for backward compatibility, but alarm-created
-/// doses should always contain it. This allows a dose acknowledged while
-/// logged out to synchronize to the correct patient later.
 class TodayDose {
   final String? patientId;
   final String scheduleId;
@@ -92,12 +88,6 @@ class ScheduleService {
     bool escalationEnabled = true,
     int escalationStep1Mins = 10,
     int escalationStep2Mins = 20,
-
-    /*
-     * Existing callers are not required to provide this. When omitted,
-     * ScheduleService retrieves medications.pill_image_url from Supabase
-     * before creating the native alarm payload.
-     */
     String? pillImageUrl,
   }) async {
     final userId =
@@ -130,10 +120,6 @@ class ScheduleService {
         'Medication name cannot be empty',
       );
     }
-
-    debugPrint(
-      '📅 Adding schedule for: $safeMedicationName',
-    );
 
     final resolvedPillImageUrl =
     await _resolvePillImageUrl(
@@ -183,10 +169,8 @@ class ScheduleService {
           'next_scheduled_at':
           nextScheduled?.toIso8601String(),
           'escalation_enabled': escalationEnabled,
-          'escalation_step1_mins':
-          escalationStep1Mins,
-          'escalation_step2_mins':
-          escalationStep2Mins,
+          'escalation_step1_mins': escalationStep1Mins,
+          'escalation_step2_mins': escalationStep2Mins,
           'is_active': true,
         },
       ).select().single();
@@ -220,10 +204,8 @@ class ScheduleService {
             dosageDisplay: safeDosageDisplay,
             scheduledFor: scheduledTime,
             pillImageUrl: resolvedPillImageUrl,
-            escalationStep1Mins:
-            escalationStep1Mins,
-            escalationStep2Mins:
-            escalationStep2Mins,
+            escalationStep1Mins: escalationStep1Mins,
+            escalationStep2Mins: escalationStep2Mins,
           );
 
           alarmCount++;
@@ -237,11 +219,8 @@ class ScheduleService {
 
       return schedule;
     } catch (error, stack) {
-      debugPrint(
-        '❌ Failed to save schedule: $error',
-      );
+      debugPrint('❌ Failed to save schedule: $error');
       debugPrint('$stack');
-
       rethrow;
     }
   }
@@ -291,11 +270,6 @@ class ScheduleService {
       );
     }
 
-    debugPrint(
-      '📅 Updating schedule: '
-          '$safeScheduleId for $safeMedicationName',
-    );
-
     final resolvedPillImageUrl =
     await _resolvePillImageUrl(
       medicationId: safeMedicationId,
@@ -322,10 +296,6 @@ class ScheduleService {
     );
 
     try {
-      /*
-       * Cancel the old alarms before scheduling replacements so old and
-       * updated reminders cannot fire for the same schedule.
-       */
       await LocalNotificationService.instance
           .cancelSchedule(safeScheduleId);
 
@@ -355,12 +325,9 @@ class ScheduleService {
           'next_scheduled_at':
           nextScheduled?.toIso8601String(),
           'escalation_enabled': escalationEnabled,
-          'escalation_step1_mins':
-          escalationStep1Mins,
-          'escalation_step2_mins':
-          escalationStep2Mins,
-          'updated_at':
-          DateTime.now().toIso8601String(),
+          'escalation_step1_mins': escalationStep1Mins,
+          'escalation_step2_mins': escalationStep2Mins,
+          'updated_at': DateTime.now().toIso8601String(),
         },
       )
           .eq('id', safeScheduleId)
@@ -397,10 +364,8 @@ class ScheduleService {
             dosageDisplay: safeDosageDisplay,
             scheduledFor: scheduledTime,
             pillImageUrl: resolvedPillImageUrl,
-            escalationStep1Mins:
-            escalationStep1Mins,
-            escalationStep2Mins:
-            escalationStep2Mins,
+            escalationStep1Mins: escalationStep1Mins,
+            escalationStep2Mins: escalationStep2Mins,
           );
 
           alarmCount++;
@@ -414,11 +379,8 @@ class ScheduleService {
 
       return schedule;
     } catch (error, stack) {
-      debugPrint(
-        '❌ Failed to update schedule: $error',
-      );
+      debugPrint('❌ Failed to update schedule: $error');
       debugPrint('$stack');
-
       rethrow;
     }
   }
@@ -427,10 +389,8 @@ class ScheduleService {
   // READ SCHEDULES
   // ══════════════════════════════════════════════════════════════
 
-  Future<List<MedicationSchedule>>
-  getMySchedules() async {
-    final userId =
-        AuthService.instance.currentUser?.id;
+  Future<List<MedicationSchedule>> getMySchedules() async {
+    final userId = AuthService.instance.currentUser?.id;
 
     if (userId == null) {
       throw Exception('Not logged in');
@@ -441,10 +401,7 @@ class ScheduleService {
         .select()
         .eq('patient_id', userId)
         .eq('is_active', true)
-        .order(
-      'next_scheduled_at',
-      ascending: true,
-    );
+        .order('next_scheduled_at', ascending: true);
 
     return (data as List)
         .map(
@@ -459,8 +416,7 @@ class ScheduleService {
   getSchedulesForMedication(
       String medicationId,
       ) async {
-    final userId =
-        AuthService.instance.currentUser?.id;
+    final userId = AuthService.instance.currentUser?.id;
 
     if (userId == null) {
       throw Exception('Not logged in');
@@ -486,11 +442,8 @@ class ScheduleService {
   // DELETE SCHEDULE
   // ══════════════════════════════════════════════════════════════
 
-  Future<void> deleteSchedule(
-      String id,
-      ) async {
-    final userId =
-        AuthService.instance.currentUser?.id;
+  Future<void> deleteSchedule(String id) async {
+    final userId = AuthService.instance.currentUser?.id;
 
     if (userId == null) {
       throw Exception('Not logged in');
@@ -503,8 +456,7 @@ class ScheduleService {
         .update(
       <String, dynamic>{
         'is_active': false,
-        'updated_at':
-        DateTime.now().toIso8601String(),
+        'updated_at': DateTime.now().toIso8601String(),
       },
     )
         .eq('id', scheduleId)
@@ -513,30 +465,92 @@ class ScheduleService {
     await LocalNotificationService.instance
         .cancelSchedule(scheduleId);
 
-    debugPrint(
-      '🗑️ Deleted schedule $scheduleId',
-    );
+    debugPrint('🗑️ Deleted schedule $scheduleId');
   }
 
   // ══════════════════════════════════════════════════════════════
-  // GET DOSES FOR A SPECIFIC DATE
+  // GET DOSES FOR THE LOGGED-IN PATIENT
   // ══════════════════════════════════════════════════════════════
 
   Future<List<TodayDose>> getDosesForDate(
       DateTime date,
       ) async {
-    final userId =
-        AuthService.instance.currentUser?.id;
+    final userId = AuthService.instance.currentUser?.id;
 
     if (userId == null) {
       throw Exception('Not logged in');
     }
 
+    return _buildDosesForDate(
+      patientId: userId,
+      date: date,
+    );
+  }
+
+  // ══════════════════════════════════════════════════════════════
+  // GET DOSES FOR ONE PATIENT — CARETAKER VIEW
+  //
+  // Used by the caretaker medication-alert flow. Verifies the active
+  // relationship and can_view_medications permission before loading.
+  // ══════════════════════════════════════════════════════════════
+
+  Future<List<TodayDose>> getDosesForPatient({
+    required String patientId,
+    required DateTime date,
+  }) async {
+    final caregiverId =
+        AuthService.instance.currentUser?.id;
+
+    if (caregiverId == null) {
+      throw Exception('Not logged in');
+    }
+
+    final safePatientId = patientId.trim();
+
+    if (safePatientId.isEmpty) {
+      throw ArgumentError.value(
+        patientId,
+        'patientId',
+        'Patient ID cannot be empty',
+      );
+    }
+
+    final relationship = await supabase
+        .from('care_relationships')
+        .select('can_view_medications, status')
+        .eq('patient_id', safePatientId)
+        .eq('caregiver_id', caregiverId)
+        .eq('status', 'active')
+        .maybeSingle();
+
+    if (relationship == null ||
+        relationship['can_view_medications'] != true) {
+      throw Exception(
+        'You are not permitted to view this patient\'s '
+            'medication schedule.',
+      );
+    }
+
+    return _buildDosesForDate(
+      patientId: safePatientId,
+      date: date,
+    );
+  }
+
+  // ══════════════════════════════════════════════════════════════
+  // SHARED DOSE BUILDER
+  // ══════════════════════════════════════════════════════════════
+
+  Future<List<TodayDose>> _buildDosesForDate({
+    required String patientId,
+    required DateTime date,
+  }) async {
     final dateString =
         date.toIso8601String().split('T').first;
 
     debugPrint(
-      '📅 Loading doses for $dateString',
+      '📅 Loading doses for $dateString '
+          '(patient: $patientId)',
     );
 
     try {
@@ -545,21 +559,25 @@ class ScheduleService {
           .select(
         '*, medications!inner(pill_image_url, *)',
       )
-          .eq('patient_id', userId)
+          .eq('patient_id', patientId)
           .eq('is_active', true)
           .lte('start_date', dateString);
 
       final doses = <TodayDose>[];
-      final weekday = date.weekday;
+
+      /*
+       * scheduled_days uses 0 = Sunday in this app.
+       * Dart weekday gives Monday = 1 … Sunday = 7, so normalize
+       * Sunday to 0 before comparing.
+       */
+      final weekdayIndex = date.weekday % 7;
 
       for (final rawRow in data as List) {
-        final schedule =
-        Map<String, dynamic>.from(
+        final schedule = Map<String, dynamic>.from(
           rawRow as Map,
         );
 
-        final medication =
-        Map<String, dynamic>.from(
+        final medication = Map<String, dynamic>.from(
           schedule['medications'] as Map,
         );
 
@@ -585,8 +603,7 @@ class ScheduleService {
           }
         }
 
-        if (schedule['frequency_type'] ==
-            'as_needed') {
+        if (schedule['frequency_type'] == 'as_needed') {
           continue;
         }
 
@@ -595,7 +612,7 @@ class ScheduleService {
 
         if (scheduledDays != null &&
             scheduledDays.isNotEmpty &&
-            !scheduledDays.contains(weekday)) {
+            !scheduledDays.contains(weekdayIndex)) {
           continue;
         }
 
@@ -608,22 +625,14 @@ class ScheduleService {
         }
 
         for (final rawTime in scheduledTimes) {
-          final parts =
-          rawTime.toString().split(':');
+          final parts = rawTime.toString().split(':');
 
-          if (parts.length < 2) {
-            continue;
-          }
+          if (parts.length < 2) continue;
 
-          final hour =
-          int.tryParse(parts[0]);
+          final hour = int.tryParse(parts[0]);
+          final minute = int.tryParse(parts[1]);
 
-          final minute =
-          int.tryParse(parts[1]);
-
-          if (hour == null || minute == null) {
-            continue;
-          }
+          if (hour == null || minute == null) continue;
 
           final doseTime = DateTime(
             date.year,
@@ -640,68 +649,53 @@ class ScheduleService {
                   'Medication';
 
           final brandName =
-          medication['brand_name']
-              ?.toString()
-              .trim();
+          medication['brand_name']?.toString().trim();
 
-          final medicationName =
-          brandName != null &&
+          final medicationName = brandName != null &&
               brandName.isNotEmpty
               ? brandName
               : genericName;
 
           doses.add(
             TodayDose(
-              patientId: userId,
-              scheduleId:
-              schedule['id'].toString(),
-              medicationId:
-              medication['id'].toString(),
+              patientId: patientId,
+              scheduleId: schedule['id'].toString(),
+              medicationId: medication['id'].toString(),
               medicationName: medicationName,
               genericName: genericName,
               dosageAmount:
               (medication['dosage_amount'] as num)
                   .toDouble(),
               dosageUnit:
-              medication['dosage_unit']
-                  .toString(),
+              medication['dosage_unit'].toString(),
               pillColor:
-              medication['pill_color']
-                  ?.toString(),
+              medication['pill_color']?.toString(),
               pillShape:
-              medication['pill_shape']
-                  ?.toString(),
-              pillImageUrl:
-              _cleanOptionalString(
-                medication['pill_image_url']
-                    ?.toString(),
+              medication['pill_shape']?.toString(),
+              pillImageUrl: _cleanOptionalString(
+                medication['pill_image_url']?.toString(),
               ),
               scheduledTime: doseTime,
-              notes:
-              medication['notes']?.toString(),
+              notes: medication['notes']?.toString(),
             ),
           );
         }
       }
 
       doses.sort(
-            (first, second) =>
-            first.scheduledTime.compareTo(
-              second.scheduledTime,
-            ),
+            (first, second) => first.scheduledTime.compareTo(
+          second.scheduledTime,
+        ),
       );
 
       debugPrint(
-        '✅ Loaded ${doses.length} doses for today',
+        '✅ Loaded ${doses.length} doses for $dateString',
       );
 
       return doses;
     } catch (error, stack) {
-      debugPrint(
-        '❌ Failed to load doses: $error',
-      );
+      debugPrint('❌ Failed to load doses: $error');
       debugPrint('$stack');
-
       rethrow;
     }
   }
@@ -715,8 +709,7 @@ class ScheduleService {
     required String patientId,
     String? suppliedImageUrl,
   }) async {
-    final supplied =
-    _cleanOptionalString(suppliedImageUrl);
+    final supplied = _cleanOptionalString(suppliedImageUrl);
 
     if (supplied != null) {
       return supplied;
@@ -734,35 +727,18 @@ class ScheduleService {
         data?['pill_image_url']?.toString(),
       );
 
-      if (imageUrl == null) {
-        debugPrint(
-          'ℹ️ Medication $medicationId has no pill image',
-        );
-      } else {
-        debugPrint(
-          '✅ Pill image URL loaded for alarm payload',
-        );
-      }
-
       return imageUrl;
     } catch (error, stack) {
-      /*
-       * Image lookup failure must not stop the medication schedule from
-       * being created. The reminder will show its no-image placeholder.
-       */
       debugPrint(
         '⚠️ Could not load pill image for alarm payload: '
             '$error',
       );
       debugPrint('$stack');
-
       return null;
     }
   }
 
-  static String? _cleanOptionalString(
-      String? value,
-      ) {
+  static String? _cleanOptionalString(String? value) {
     final cleaned = value?.trim();
 
     if (cleaned == null || cleaned.isEmpty) {
@@ -798,13 +774,9 @@ class ScheduleService {
                 (first, second) {
               final firstMinutes =
                   first.hour * 60 + first.minute;
-
               final secondMinutes =
                   second.hour * 60 + second.minute;
-
-              return firstMinutes.compareTo(
-                secondMinutes,
-              );
+              return firstMinutes.compareTo(secondMinutes);
             },
           );
 
@@ -833,8 +805,7 @@ class ScheduleService {
         );
 
       case 'every_x_hours':
-        if (intervalHours == null ||
-            intervalHours <= 0) {
+        if (intervalHours == null || intervalHours <= 0) {
           return null;
         }
 
@@ -862,9 +833,7 @@ class ScheduleService {
     final result = <DateTime>[];
     final now = DateTime.now();
 
-    final defaultLimit = now.add(
-      Duration(days: daysAhead),
-    );
+    final defaultLimit = now.add(Duration(days: daysAhead));
 
     final limit = endDate != null &&
         endDate.isBefore(defaultLimit)
@@ -887,12 +856,11 @@ class ScheduleService {
     );
 
     while (!cursor.isAfter(normalizedLimit)) {
-      final weekday = cursor.weekday;
+      final weekdayIndex = cursor.weekday % 7;
 
-      final dayAllowed =
-          scheduledDays == null ||
-              scheduledDays.isEmpty ||
-              scheduledDays.contains(weekday);
+      final dayAllowed = scheduledDays == null ||
+          scheduledDays.isEmpty ||
+          scheduledDays.contains(weekdayIndex);
 
       if (dayAllowed) {
         for (final time in scheduledTimes) {
@@ -905,17 +873,13 @@ class ScheduleService {
           );
 
           if (scheduledDateTime.isAfter(now) &&
-              !scheduledDateTime.isAfter(
-                normalizedLimit,
-              )) {
+              !scheduledDateTime.isAfter(normalizedLimit)) {
             result.add(scheduledDateTime);
           }
         }
       }
 
-      cursor = cursor.add(
-        const Duration(days: 1),
-      );
+      cursor = cursor.add(const Duration(days: 1));
     }
 
     result.sort();

@@ -1,12 +1,19 @@
 // lib/home/caretaker/caretaker_dashboard_tab.dart
 
 import 'package:flutter/material.dart';
+import 'package:supabase_flutter/supabase_flutter.dart';
+
 import '../../gui/caretakers/pending_invites_screen.dart';
+import '../../models/patient_activity.dart';
 import '../../models/profile.dart';
 import '../../services/auth_service.dart';
+import '../../services/patient_activity_service.dart';
 import '../../theme/app_colors.dart';
 import '../../theme/app_text_styles.dart';
 import '../../widgets/loaders/skeleton_loader.dart';
+import 'widgets/activity_detail_bottom_sheet.dart';
+import 'widgets/activity_filter_bottom_sheet.dart';
+import 'widgets/patient_activity_card.dart';
 
 class CaretakerDashboardTab extends StatefulWidget {
   const CaretakerDashboardTab({super.key});
@@ -19,10 +26,25 @@ class _CaretakerDashboardTabState extends State<CaretakerDashboardTab> {
   Profile? _profile;
   bool _isLoading = true;
 
+  List<PatientActivity> _activities = [];
+  Map<String, int> _stats = {};
+  List<Map<String, dynamic>> _patients = [];
+
+  String? _selectedPatientId;
+  String? _selectedStatus;
+
+  RealtimeChannel? _activitySubscription;
+
   @override
   void initState() {
     super.initState();
     _loadProfile();
+  }
+
+  @override
+  void dispose() {
+    _activitySubscription?.unsubscribe();
+    super.dispose();
   }
 
   Future<void> _loadProfile() async {
@@ -32,7 +54,106 @@ class _CaretakerDashboardTabState extends State<CaretakerDashboardTab> {
         _profile = profile as Profile?;
         _isLoading = false;
       });
+
+      if (_profile != null) {
+        _subscribeToActivities();
+        _loadInitialData();
+      }
     }
+  }
+
+  void _subscribeToActivities() {
+    if (_profile == null) return;
+
+    _activitySubscription = PatientActivityService.instance
+        .subscribeToPatientActivities(
+      caregiverId: _profile!.id,
+      onData: (activities) {
+        if (mounted) {
+          setState(() {
+            _activities = activities;
+          });
+        }
+      },
+      onError: (error) {
+        debugPrint('❌ Activity subscription error: $error');
+      },
+    );
+  }
+
+  Future<void> _loadInitialData() async {
+    if (_profile == null) return;
+
+    try {
+      final results = await Future.wait([
+        PatientActivityService.instance.getRecentActivities(
+          caregiverId: _profile!.id,
+          patientId: _selectedPatientId,
+          status: _selectedStatus,
+          limit: 20,
+        ),
+        PatientActivityService.instance.getActivityStats(
+          caregiverId: _profile!.id,
+          patientId: _selectedPatientId,
+        ),
+        PatientActivityService.instance.getPatientsWithActivity(
+          caregiverId: _profile!.id,
+        ),
+      ]);
+
+      if (mounted) {
+        setState(() {
+          _activities = results[0] as List<PatientActivity>;
+          _stats = results[1] as Map<String, int>;
+          _patients = results[2] as List<Map<String, dynamic>>;
+        });
+      }
+    } catch (error, stack) {
+      debugPrint('❌ Failed to load dashboard data: $error');
+      debugPrint('$stack');
+    }
+  }
+
+  Future<void> _refreshData() async {
+    await _loadInitialData();
+  }
+
+  void _openFilterSheet() {
+    showModalBottomSheet(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: Colors.transparent,
+      builder: (context) => ActivityFilterBottomSheet(
+        patients: _patients,
+        selectedPatientId: _selectedPatientId,
+        selectedStatus: _selectedStatus,
+        onApply: (patientId, status) {
+          setState(() {
+            _selectedPatientId = patientId;
+            _selectedStatus = status;
+          });
+          _loadInitialData();
+        },
+      ),
+    );
+  }
+
+  void _showActivityDetail(PatientActivity activity) {
+    showModalBottomSheet(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: Colors.transparent,
+      builder: (context) => ActivityDetailBottomSheet(
+        activity: activity,
+      ),
+    );
+  }
+
+  void _openPendingInvites() {
+    Navigator.push(
+      context,
+      MaterialPageRoute(builder: (_) => const PendingInvitesScreen()),
+    );
   }
 
   String get _greeting {
@@ -42,12 +163,9 @@ class _CaretakerDashboardTabState extends State<CaretakerDashboardTab> {
     return 'Good evening';
   }
 
-  void _openPendingInvites() {
-    Navigator.push(
-      context,
-      MaterialPageRoute(builder: (_) => const PendingInvitesScreen()),
-    );
-  }
+  bool get _hasActiveFilters =>
+      _selectedPatientId != null || (_selectedStatus != null && _selectedStatus != 'all');
+
   @override
   Widget build(BuildContext context) {
     if (_isLoading) {
@@ -56,109 +174,150 @@ class _CaretakerDashboardTabState extends State<CaretakerDashboardTab> {
 
     return RefreshIndicator(
       color: AppColors.primary,
-      onRefresh: _loadProfile,
+      onRefresh: _refreshData,
       child: ListView(
         padding: const EdgeInsets.all(16),
         children: [
 
-          const SizedBox(height: 24),
-
-          // ── Stats Row ──
-          Row(
-            children: [
-              Expanded(
-                child: _StatCard(
-                  icon: Icons.people_rounded,
-                  iconColor: AppColors.secondary,
-                  label: 'Patients',
-                  value: '0',
-                  suffix: 'active',
-                ),
-              ),
-              const SizedBox(width: 12),
-              Expanded(
-                child: _StatCard(
-                  icon: Icons.warning_amber_rounded,
-                  iconColor: AppColors.warning,
-                  label: 'Alerts',
-                  value: '0',
-                  suffix: 'today',
-                ),
-              ),
-            ],
-          ),
-
-          const SizedBox(height: 12),
-
-          Row(
-            children: [
-              Expanded(
-                child: _StatCard(
-                  icon: Icons.check_circle_rounded,
-                  iconColor: AppColors.primary,
-                  label: 'On Track',
-                  value: '—',
-                  suffix: 'patients',
-                ),
-              ),
-              const SizedBox(width: 12),
-              Expanded(
-                child: _StatCard(
-                  icon: Icons.error_outline_rounded,
-                  iconColor: AppColors.error,
-                  label: 'Needs Help',
-                  value: '0',
-                  suffix: 'patients',
-                ),
-              ),
-            ],
-          ),
-
-          const SizedBox(height: 32),
-
-          // ── Recent Activity Section ──
-          Text('Recent Activity', style: AppTextStyles.h2),
-          const SizedBox(height: 12),
-
-          Container(
-            padding: const EdgeInsets.all(24),
-            decoration: BoxDecoration(
-              color: AppColors.surface,
-              borderRadius: BorderRadius.circular(16),
-              border: Border.all(color: AppColors.border),
-            ),
-            child: Column(
+          // Stats Grid
+          if (_stats.isNotEmpty) ...[
+            Row(
               children: [
-                Container(
-                  padding: const EdgeInsets.all(16),
-                  decoration: BoxDecoration(
-                    color: AppColors.surfaceVariant,
-                    shape: BoxShape.circle,
-                  ),
-                  child: const Icon(
-                    Icons.timeline_rounded,
-                    size: 32,
-                    color: AppColors.secondary,
+                Expanded(
+                  child: _StatCard(
+                    icon: Icons.check_circle_rounded,
+                    iconColor: Colors.green,
+                    label: 'Taken',
+                    value: '${_stats['taken'] ?? 0}',
+                    suffix: 'doses',
                   ),
                 ),
-                const SizedBox(height: 16),
-                Text(
-                  'No recent activity',
-                  style: AppTextStyles.titleMedium,
-                ),
-                const SizedBox(height: 4),
-                Text(
-                  'Once you link with patients, their activity will appear here',
-                  style: AppTextStyles.bodySmall,
-                  textAlign: TextAlign.center,
+                const SizedBox(width: 12),
+                Expanded(
+                  child: _StatCard(
+                    icon: Icons.cancel_rounded,
+                    iconColor: AppColors.error,
+                    label: 'Missed',
+                    value: '${_stats['missed'] ?? 0}',
+                    suffix: 'doses',
+                  ),
                 ),
               ],
             ),
+            const SizedBox(height: 12),
+            Row(
+              children: [
+                Expanded(
+                  child: _StatCard(
+                    icon: Icons.pending_rounded,
+                    iconColor: AppColors.warning,
+                    label: 'Pending',
+                    value: '${_stats['pending'] ?? 0}',
+                    suffix: 'doses',
+                  ),
+                ),
+                const SizedBox(width: 12),
+                Expanded(
+                  child: _StatCard(
+                    icon: Icons.remove_circle_rounded,
+                    iconColor: AppColors.textSecondary,
+                    label: 'Skipped',
+                    value: '${_stats['skipped'] ?? 0}',
+                    suffix: 'doses',
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 32),
+          ],
+
+          // Recent Activity Section
+          Row(
+            children: [
+              Expanded(
+                child: Text('Recent Activity', style: AppTextStyles.h2),
+              ),
+              if (_hasActiveFilters)
+                Chip(
+                  label: const Text('Filtered'),
+                  deleteIcon: const Icon(Icons.close, size: 16),
+                  onDeleted: () {
+                    setState(() {
+                      _selectedPatientId = null;
+                      _selectedStatus = null;
+                    });
+                    _loadInitialData();
+                  },
+                  backgroundColor: AppColors.primary.withOpacity(0.1),
+                  labelStyle: AppTextStyles.labelSmall.copyWith(
+                    color: AppColors.primary,
+                  ),
+                ),
+              const SizedBox(width: 8),
+              IconButton(
+                icon: Icon(
+                  Icons.filter_list_rounded,
+                  color: _hasActiveFilters ? AppColors.primary : AppColors.textSecondary,
+                ),
+                onPressed: _openFilterSheet,
+                tooltip: 'Filter activities',
+              ),
+            ],
           ),
+          const SizedBox(height: 12),
+
+          if (_activities.isEmpty)
+            Container(
+              padding: const EdgeInsets.all(24),
+              decoration: BoxDecoration(
+                color: AppColors.surface,
+                borderRadius: BorderRadius.circular(16),
+                border: Border.all(color: AppColors.border),
+              ),
+              child: Column(
+                children: [
+                  Container(
+                    padding: const EdgeInsets.all(16),
+                    decoration: BoxDecoration(
+                      color: AppColors.surfaceVariant,
+                      shape: BoxShape.circle,
+                    ),
+                    child: const Icon(
+                      Icons.timeline_rounded,
+                      size: 32,
+                      color: AppColors.secondary,
+                    ),
+                  ),
+                  const SizedBox(height: 16),
+                  Text(
+                    _hasActiveFilters
+                        ? 'No activities match your filters'
+                        : 'No recent activity',
+                    style: AppTextStyles.titleMedium,
+                  ),
+                  const SizedBox(height: 4),
+                  Text(
+                    _hasActiveFilters
+                        ? 'Try adjusting your filter criteria'
+                        : 'Once you link with patients, their activity will appear here',
+                    style: AppTextStyles.bodySmall,
+                    textAlign: TextAlign.center,
+                  ),
+                ],
+              ),
+            )
+          else
+            ..._activities.map((activity) => Padding(
+              padding: const EdgeInsets.only(bottom: 12),
+              child: PatientActivityCard(
+                activity: activity,
+                onTap: () => _showActivityDetail(activity),
+              ),
+            )),
 
           const SizedBox(height: 24),
 
-          // ── Quick Actions ──
+          // Quick Actions
           Text('Quick Actions', style: AppTextStyles.h2),
           const SizedBox(height: 12),
 
@@ -169,25 +328,16 @@ class _CaretakerDashboardTabState extends State<CaretakerDashboardTab> {
             subtitle: 'View and respond to pending invites',
             onTap: _openPendingInvites,
           ),
-
-          const SizedBox(height: 8),
-
-          _QuickActionTile(
-            icon: Icons.notifications_active_rounded,
-            iconColor: AppColors.warning,
-            title: 'Alert Settings',
-            subtitle: 'Configure how you receive notifications',
-            onTap: () {},
-          ),
-
-          const SizedBox(height: 24),
         ],
       ),
     );
   }
 }
 
-// ── Stat Card ──
+// ══════════════════════════════════════════════════════════════
+// STAT CARD
+// ══════════════════════════════════════════════════════════════
+
 class _StatCard extends StatelessWidget {
   final IconData icon;
   final Color iconColor;
@@ -241,7 +391,10 @@ class _StatCard extends StatelessWidget {
   }
 }
 
-// ── Quick Action Tile ──
+// ══════════════════════════════════════════════════════════════
+// QUICK ACTION TILE
+// ══════════════════════════════════════════════════════════════
+
 class _QuickActionTile extends StatelessWidget {
   final IconData icon;
   final Color iconColor;
@@ -301,7 +454,10 @@ class _QuickActionTile extends StatelessWidget {
   }
 }
 
-// ── Skeleton ──
+// ══════════════════════════════════════════════════════════════
+// SKELETON
+// ══════════════════════════════════════════════════════════════
+
 class _CaretakerDashboardSkeleton extends StatelessWidget {
   const _CaretakerDashboardSkeleton();
 
@@ -310,7 +466,7 @@ class _CaretakerDashboardSkeleton extends StatelessWidget {
     return ListView(
       padding: const EdgeInsets.all(16),
       children: const [
-        SkeletonBox(height: 100, borderRadius: 20),
+        SkeletonBox(height: 60, borderRadius: 12),
         SizedBox(height: 24),
         Row(
           children: [
@@ -329,6 +485,8 @@ class _CaretakerDashboardSkeleton extends StatelessWidget {
         ),
         SizedBox(height: 32),
         SkeletonBox(height: 20, width: 150),
+        SizedBox(height: 12),
+        SkeletonBox(height: 140, borderRadius: 16),
         SizedBox(height: 12),
         SkeletonBox(height: 140, borderRadius: 16),
       ],

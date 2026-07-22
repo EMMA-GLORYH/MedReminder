@@ -97,6 +97,11 @@
             android:name=".TtsAlarmReceiver"
             android:exported="false" />
 
+        <!-- Caretaker medication TTS-only alarm receiver. -->
+        <receiver
+            android:name=".CaretakerMedicationAlarmReceiver"
+            android:exported="false" />
+
         <!-- Restores native medication alarms after reboot/update. -->
         <receiver
             android:name=".BootRescheduleReceiver"

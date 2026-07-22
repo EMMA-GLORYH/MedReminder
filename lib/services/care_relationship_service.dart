@@ -12,7 +12,7 @@ class CareRelationshipService {
 
   // ══════════════════════════════════════════════════════════════
   // PATIENT SIDE — Send an invite to a caretaker by email
-  // ══════════════════════════════════════════════════════════════
+  // ═════════════════════════════════════════════════════════════
   Future<CareRelationship> inviteCaretaker({
     required String caretakerEmail,
     String? relationship,
@@ -23,7 +23,7 @@ class CareRelationshipService {
     if (patientId == null) throw Exception('Not logged in');
 
     debugPrint('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
-    debugPrint('📨 INVITE CARETAKER START');
+    debugPrint(' INVITE CARETAKER START');
     debugPrint('   Patient ID : $patientId');
     debugPrint('   Email      : $caretakerEmail');
 
@@ -111,7 +111,7 @@ class CareRelationshipService {
       }
     }
 
-    // ── Step 4: Insert new pending invite ─────────────────────
+    // ── Step 4: Insert new pending invite ────────────────────
     debugPrint('📝 Step 4 — Inserting new invite row...');
     debugPrint('   patient_id  : $patientId');
     debugPrint('   caregiver_id: $caretakerId');
@@ -705,5 +705,92 @@ class CareRelationshipService {
     await getPatientRelationship(patientId);
 
     return relationship?.canReceiveAlerts == true;
+  }
+
+  // ══════════════════════════════════════════════════════════════
+  // CARETAKER MEDICATION MANAGEMENT PERMISSIONS
+  // ══════════════════════════════════════════════════════════════
+
+  /// Check if current caretaker can edit medications for a patient.
+  /// Used by CaretakerAddMedicationScreen and CaretakerAddScheduleScreen.
+  Future<bool> canEditMedications(String patientId) async {
+    try {
+      final caregiverId = AuthService.instance.currentUser?.id;
+      if (caregiverId == null) return false;
+
+      final response = await supabase
+          .from('care_relationships')
+          .select('can_edit_medications, status')
+          .eq('patient_id', patientId)
+          .eq('caregiver_id', caregiverId)
+          .eq('status', 'active')
+          .maybeSingle();
+
+      if (response == null) return false;
+
+      return response['can_edit_medications'] == true;
+    } catch (e) {
+      debugPrint('Error checking edit permission: $e');
+      return false;
+    }
+  }
+
+  /// Check if current caretaker can view medications for a patient.
+  /// Alias for canViewPatientMedications for consistency.
+  Future<bool> canViewMedications(String patientId) async {
+    return await canViewPatientMedications(patientId);
+  }
+
+  /// Get the full care relationship for current user and patient.
+  /// Returns null if no active relationship exists.
+  Future<CareRelationship?> getRelationship(String patientId) async {
+    return await getPatientRelationship(patientId);
+  }
+
+  /// Check if current user is an active caretaker for the patient.
+  Future<bool> isActiveCaretaker(String patientId) async {
+    final relationship = await getPatientRelationship(patientId);
+    return relationship != null;
+  }
+
+  /// Get all permissions for current caretaker-patient relationship.
+  Future<Map<String, bool>> getCaretakerPermissions(String patientId) async {
+    final relationship = await getPatientRelationship(patientId);
+
+    if (relationship == null) {
+      return {
+        'canViewLogs': false,
+        'canViewMedications': false,
+        'canEditMedications': false,
+        'canReceiveAlerts': false,
+      };
+    }
+
+    return {
+      'canViewLogs': relationship.canViewLogs,
+      'canViewMedications': relationship.canViewMedications,
+      'canEditMedications': relationship.canEditMedications,
+      'canReceiveAlerts': relationship.canReceiveAlerts,
+    };
+  }
+
+  /// Check multiple permissions at once for efficiency.
+  Future<bool> hasAnyPermission(
+      String patientId, {
+        bool checkViewLogs = false,
+        bool checkViewMedications = false,
+        bool checkEditMedications = false,
+        bool checkReceiveAlerts = false,
+      }) async {
+    final relationship = await getPatientRelationship(patientId);
+
+    if (relationship == null) return false;
+
+    if (checkViewLogs && relationship.canViewLogs) return true;
+    if (checkViewMedications && relationship.canViewMedications) return true;
+    if (checkEditMedications && relationship.canEditMedications) return true;
+    if (checkReceiveAlerts && relationship.canReceiveAlerts) return true;
+
+    return false;
   }
 }

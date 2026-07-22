@@ -17,6 +17,7 @@ import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.plugin.common.MethodCall
 import io.flutter.plugin.common.MethodChannel
+import kotlin.math.absoluteValue
 
 class MainActivity : FlutterActivity() {
 
@@ -32,6 +33,9 @@ class MainActivity : FlutterActivity() {
 
         private const val SOS_SMS_CHANNEL =
             "sos_sms_fallback"
+
+        private const val CARETAKER_MEDICATION_CHANNEL =
+            "caretaker_medication_alerts"
 
         private const val ACTION_OPEN_SCANNER =
             "com.example.mar.OPEN_SCANNER"
@@ -81,6 +85,7 @@ class MainActivity : FlutterActivity() {
         configureScannerRouteChannel(flutterEngine)
         configureSosRealtimeChannel(flutterEngine)
         configureSosSmsChannel(flutterEngine)
+        configureCaretakerMedicationChannel(flutterEngine)
 
         extractScannerPayload(intent)?.let { payload ->
             pendingScannerPayload = payload
@@ -517,6 +522,303 @@ class MainActivity : FlutterActivity() {
                 )
             }
         }
+    }
+
+    // ══════════════════════════════════════════════════════════════
+    // CARETAKER MEDICATION TTS CHANNEL
+    // ══════════════════════════════════════════════════════════════
+
+    private fun configureCaretakerMedicationChannel(
+        flutterEngine: FlutterEngine
+    ) {
+        MethodChannel(
+            flutterEngine.dartExecutor.binaryMessenger,
+            CARETAKER_MEDICATION_CHANNEL
+        ).setMethodCallHandler { call, result ->
+            try {
+                when (call.method) {
+                    "scheduleCaretakerMedicationAlert" -> {
+                        val alertId =
+                            call.argument<String>("alertId")
+                                ?.trim()
+                                .orEmpty()
+
+                        val patientId =
+                            call.argument<String>("patientId")
+                                ?.trim()
+                                .orEmpty()
+
+                        val patientName =
+                            call.argument<String>("patientName")
+                                ?.trim()
+                                .orEmpty()
+
+                        val scheduleId =
+                            call.argument<String>("scheduleId")
+                                ?.trim()
+                                .orEmpty()
+
+                        val medicationId =
+                            call.argument<String>("medicationId")
+                                ?.trim()
+                                .orEmpty()
+
+                        val scheduledForMillis =
+                            call.argument<Number>(
+                                "scheduledForMillis"
+                            )?.toLong() ?: 0L
+
+                        val originalScheduledForMillis =
+                            call.argument<Number>(
+                                "originalScheduledForMillis"
+                            )?.toLong() ?: scheduledForMillis
+
+                        val message =
+                            call.argument<String>("message")
+                                ?.trim()
+                                .orEmpty()
+
+                        val alertType =
+                            call.argument<String>("alertType")
+                                ?.trim()
+                                .orEmpty()
+
+                        val repeatCount =
+                            (
+                                    call.argument<Number>(
+                                        "ttsRepeatCount"
+                                    )?.toInt() ?: 1
+                                    ).coerceIn(1, 3)
+
+                        if (alertId.isBlank() ||
+                            patientId.isBlank() ||
+                            scheduleId.isBlank() ||
+                            medicationId.isBlank() ||
+                            scheduledForMillis <= 0L ||
+                            message.isBlank()
+                        ) {
+                            result.error(
+                                "INVALID_ARGUMENT",
+                                "Required caretaker medication alert data is missing",
+                                null
+                            )
+                            return@setMethodCallHandler
+                        }
+
+                        scheduleCaretakerMedicationAlarm(
+                            alertId = alertId,
+                            patientId = patientId,
+                            patientName = patientName,
+                            scheduleId = scheduleId,
+                            medicationId = medicationId,
+                            scheduledForMillis = scheduledForMillis,
+                            originalScheduledForMillis =
+                                originalScheduledForMillis,
+                            message = message,
+                            alertType = alertType,
+                            ttsRepeatCount = repeatCount
+                        )
+
+                        result.success(null)
+                    }
+
+                    "cancelCaretakerMedicationAlert" -> {
+                        val alertId =
+                            call.argument<String>("alertId")
+                                ?.trim()
+                                .orEmpty()
+
+                        if (alertId.isBlank()) {
+                            result.error(
+                                "INVALID_ARGUMENT",
+                                "alertId is required",
+                                null
+                            )
+                            return@setMethodCallHandler
+                        }
+
+                        cancelCaretakerMedicationAlarm(alertId)
+                        result.success(null)
+                    }
+
+                    "cancelCaretakerPatientAlerts" -> {
+                        val patientId =
+                            call.argument<String>("patientId")
+                                ?.trim()
+                                .orEmpty()
+
+                        /*
+                         * Patient-wide cancellation will be completed after the
+                         * receiver/service storage is added.
+                         */
+                        Log.d(
+                            LOG_TAG,
+                            "Caretaker patient alert cancellation requested: "
+                                    + patientId
+                        )
+
+                        result.success(null)
+                    }
+
+                    "stopCaretakerMedicationAlert" -> {
+                        stopTtsService()
+                        result.success(null)
+                    }
+
+                    else -> {
+                        result.notImplemented()
+                    }
+                }
+            } catch (error: Exception) {
+                Log.e(
+                    LOG_TAG,
+                    "Caretaker medication channel error",
+                    error
+                )
+
+                result.error(
+                    "CARETAKER_MEDICATION_ERROR",
+                    error.message
+                        ?: "Caretaker medication alert failed",
+                    null
+                )
+            }
+        }
+    }
+
+    private fun scheduleCaretakerMedicationAlarm(
+        alertId: String,
+        patientId: String,
+        patientName: String,
+        scheduleId: String,
+        medicationId: String,
+        scheduledForMillis: Long,
+        originalScheduledForMillis: Long,
+        message: String,
+        alertType: String,
+        ttsRepeatCount: Int
+    ) {
+        val alarmManager =
+            getSystemService(
+                Context.ALARM_SERVICE
+            ) as AlarmManager
+
+        val alarmIntent = Intent(
+            this,
+            CaretakerMedicationAlarmReceiver::class.java
+        ).apply {
+            putExtra("alertId", alertId)
+            putExtra("patientId", patientId)
+            putExtra("patientName", patientName)
+            putExtra("scheduleId", scheduleId)
+            putExtra("medicationId", medicationId)
+            putExtra(
+                "scheduledForMillis",
+                scheduledForMillis
+            )
+            putExtra(
+                "originalScheduledForMillis",
+                originalScheduledForMillis
+            )
+            putExtra("message", message)
+            putExtra("alertType", alertType)
+            putExtra("ttsRepeatCount", ttsRepeatCount)
+        }
+
+        val requestCode =
+            alertId.hashCode().absoluteValue
+
+        val pendingIntent =
+            PendingIntent.getBroadcast(
+                this,
+                requestCode,
+                alarmIntent,
+                pendingIntentFlags()
+            )
+
+        try {
+            when {
+                Build.VERSION.SDK_INT >=
+                        Build.VERSION_CODES.S &&
+                        !alarmManager.canScheduleExactAlarms() -> {
+                    alarmManager.setAndAllowWhileIdle(
+                        AlarmManager.RTC_WAKEUP,
+                        scheduledForMillis,
+                        pendingIntent
+                    )
+                }
+
+                Build.VERSION.SDK_INT >=
+                        Build.VERSION_CODES.M -> {
+                    alarmManager.setExactAndAllowWhileIdle(
+                        AlarmManager.RTC_WAKEUP,
+                        scheduledForMillis,
+                        pendingIntent
+                    )
+                }
+
+                else -> {
+                    alarmManager.setExact(
+                        AlarmManager.RTC_WAKEUP,
+                        scheduledForMillis,
+                        pendingIntent
+                    )
+                }
+            }
+
+            Log.d(
+                LOG_TAG,
+                "Caretaker medication TTS scheduled: " +
+                        "alertId=$alertId, " +
+                        "time=$scheduledForMillis, " +
+                        "type=$alertType"
+            )
+        } catch (error: SecurityException) {
+            Log.e(
+                LOG_TAG,
+                "Could not schedule caretaker medication alert",
+                error
+            )
+
+            alarmManager.setAndAllowWhileIdle(
+                AlarmManager.RTC_WAKEUP,
+                scheduledForMillis,
+                pendingIntent
+            )
+        }
+    }
+
+    private fun cancelCaretakerMedicationAlarm(
+        alertId: String
+    ) {
+        val alarmManager =
+            getSystemService(
+                Context.ALARM_SERVICE
+            ) as AlarmManager
+
+        val intent = Intent(
+            this,
+            CaretakerMedicationAlarmReceiver::class.java
+        )
+
+        val requestCode =
+            alertId.hashCode().absoluteValue
+
+        val pendingIntent =
+            PendingIntent.getBroadcast(
+                this,
+                requestCode,
+                intent,
+                pendingIntentFlags()
+            )
+
+        alarmManager.cancel(pendingIntent)
+        pendingIntent.cancel()
+
+        Log.d(
+            LOG_TAG,
+            "Cancelled caretaker medication alert: $alertId"
+        )
     }
 
     private fun hasSmsPermission(): Boolean {

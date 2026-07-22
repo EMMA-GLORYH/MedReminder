@@ -1,6 +1,7 @@
 // lib/screens/home/patient/history_tab.dart
 
 import 'package:flutter/material.dart';
+import 'package:mar/services/auth_service.dart';
 import 'package:mar/services/dose_log_service.dart';
 import 'package:mar/theme/app_colors.dart';
 import 'package:mar/theme/app_text_styles.dart';
@@ -39,18 +40,47 @@ class _HistoryTabState extends State<HistoryTab> {
     });
 
     try {
+      // ✅ FIX: Fallback to current user if patientId is empty
+      String targetPatientId = widget.patientId.trim();
+      if (targetPatientId.isEmpty) {
+        targetPatientId = AuthService.instance.currentUser?.id ?? '';
+      }
+
+      if (targetPatientId.isEmpty) {
+        throw Exception('Patient ID is missing and no user is logged in');
+      }
+
+      debugPrint(' Loading history for patient ID: $targetPatientId');
+
       final data = await DoseLogService.instance
-          .getDoseHistoryForPatient(widget.patientId);
+          .getDoseHistoryForPatient(targetPatientId);
+
       if (mounted) {
         setState(() {
           _history = data;
           _isLoading = false;
         });
       }
-    } catch (e) {
+    } catch (e, stack) {
+      debugPrint(' History load error: $e');
+      debugPrint('$stack');
+
       if (mounted) {
         setState(() {
-          _error = 'Could not load history';
+          final errorMsg = e.toString();
+
+          // ✅ IMPROVED ERROR HANDLING
+          if (errorMsg.contains('not permitted') || errorMsg.contains('Permission denied')) {
+            _error = 'You do not have permission to view this history. Ensure the caretaker relationship is active and has "View Logs" enabled.';
+          } else if (errorMsg.contains('row-level security') || errorMsg.contains('RLS')) {
+            _error = 'Database permission error. Please contact support.';
+          } else if (errorMsg.contains('column') && errorMsg.contains('does not exist')) {
+            _error = 'Database schema mismatch. Check console for missing column.';
+          } else if (errorMsg.contains('SocketException') || errorMsg.contains('Network')) {
+            _error = 'No internet connection.';
+          } else {
+            _error = errorMsg.replaceAll('Exception: ', '').replaceAll('PostgrestException: ', '');
+          }
           _isLoading = false;
         });
       }
@@ -85,16 +115,16 @@ class _HistoryTabState extends State<HistoryTab> {
     return '${weekdays[date.weekday % 7]}, ${months[date.month - 1]} ${date.day}';
   }
 
-  // ── One Scaffold for every state — loading, error, empty, and loaded ──
-  // all share the same AppBar and background, so nothing pops in/out or
-  // renders on an unstyled background as the screen transitions between
-  // states.
   @override
   Widget build(BuildContext context) {
+    final title = widget.patientName.trim().isNotEmpty
+        ? '${widget.patientName} — Dose History'
+        : 'Dose History';
+
     return Scaffold(
       backgroundColor: AppColors.background,
       appBar: AppBar(
-        title: Text('${widget.patientName} — Dose History'),
+        title: Text(title),
         elevation: 0,
         backgroundColor: Colors.transparent,
         foregroundColor: AppColors.textPrimary,
@@ -113,7 +143,7 @@ class _HistoryTabState extends State<HistoryTab> {
         child: ListView(
           physics: const AlwaysScrollableScrollPhysics(),
           children: [
-            SizedBox(height: MediaQuery.of(context).size.height * 0.2),
+            SizedBox(height: MediaQuery.of(context).size.height * 0.15),
             Center(
               child: Padding(
                 padding: const EdgeInsets.symmetric(horizontal: 32),
@@ -130,10 +160,27 @@ class _HistoryTabState extends State<HistoryTab> {
                           size: 44, color: AppColors.error),
                     ),
                     const SizedBox(height: 16),
-                    Text(_error!,
+                    Text('Could not load history',
                         style: AppTextStyles.titleMedium,
                         textAlign: TextAlign.center),
-                    const SizedBox(height: 12),
+                    const SizedBox(height: 8),
+                    Container(
+                      padding: const EdgeInsets.all(12),
+                      decoration: BoxDecoration(
+                        color: Colors.black.withValues(alpha: 0.05),
+                        borderRadius: BorderRadius.circular(8),
+                      ),
+                      child: Text(
+                        _error!,
+                        style: AppTextStyles.bodySmall.copyWith(
+                          color: AppColors.error,
+                          fontFamily: 'monospace',
+                          fontSize: 11,
+                        ),
+                        textAlign: TextAlign.center,
+                      ),
+                    ),
+                    const SizedBox(height: 16),
                     TextButton.icon(
                       onPressed: _loadHistory,
                       icon: const Icon(Icons.refresh_rounded, size: 18),
@@ -175,7 +222,7 @@ class _HistoryTabState extends State<HistoryTab> {
                     Text('No history yet', style: AppTextStyles.h2),
                     const SizedBox(height: 8),
                     Text(
-                      'Your verified dose history will appear here.',
+                      'Verified dose history will appear here.',
                       style: AppTextStyles.bodyMedium
                           .copyWith(color: AppColors.textSecondary),
                       textAlign: TextAlign.center,
@@ -359,7 +406,6 @@ class _HistoryCard extends StatelessWidget {
           Row(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              // ── Medicine image or fallback color avatar ──
               ClipRRect(
                 borderRadius: BorderRadius.circular(12),
                 child: pillImageUrl != null && pillImageUrl.isNotEmpty
@@ -373,8 +419,6 @@ class _HistoryCard extends StatelessWidget {
                     : _FallbackAvatar(colorStr: pillColorStr),
               ),
               const SizedBox(width: 14),
-
-              // ── Name, dosage, timing ──
               Expanded(
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
@@ -402,10 +446,7 @@ class _HistoryCard extends StatelessWidget {
                   ],
                 ),
               ),
-
               const SizedBox(width: 8),
-
-              // ── Status badge ──
               Column(
                 crossAxisAlignment: CrossAxisAlignment.end,
                 children: [
@@ -446,8 +487,6 @@ class _HistoryCard extends StatelessWidget {
               ),
             ],
           ),
-
-          // ── Notes — full text, wraps instead of being clipped ──
           if (hasNotes) ...[
             const SizedBox(height: 10),
             Container(
@@ -529,9 +568,6 @@ class _FallbackAvatar extends StatelessWidget {
   }
 }
 
-// ══════════════════════════════════════════════════════════════
-// SKELETON LOADER — no separate Scaffold; renders inside the shared one
-// ══════════════════════════════════════════════════════════════
 class _HistorySkeleton extends StatelessWidget {
   const _HistorySkeleton();
 

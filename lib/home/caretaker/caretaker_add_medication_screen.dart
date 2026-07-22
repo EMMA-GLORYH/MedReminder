@@ -1,38 +1,45 @@
-// lib/gui/medications/add_schedule_screen.dart
+// lib/screens/home/caretaker/caretaker_add_schedule_screen.dart
 
 import 'package:flutter/material.dart';
 
-import '../../models/medication_schedule.dart';
-import '../../services/local_cache_service.dart';
-import '../../services/medication_service.dart';
-import '../../services/schedule_service.dart';
-import '../../theme/app_colors.dart';
-import '../../theme/app_text_styles.dart';
-import '../../widgets/buttons/app_button.dart';
-import '../../widgets/snackbar/app_snackbar.dart';
+import '../../../models/medication_schedule.dart';
+import '../../../services/care_relationship_service.dart';
+import '../../../services/local_cache_service.dart';
+import '../../../services/medication_service.dart';
+import '../../../services/schedule_service.dart';
+import '../../../theme/app_colors.dart';
+import '../../../theme/app_text_styles.dart';
+import '../../../widgets/buttons/app_button.dart';
+import '../../../widgets/snackbar/app_snackbar.dart';
 
-class AddScheduleScreen extends StatefulWidget {
+class CaretakerAddScheduleScreen extends StatefulWidget {
   final String medicationId;
   final String medicationName;
+  final String patientId;
+  final String patientName;
 
   final void Function(List<TodayDose> optimisticDoses)? onOptimisticDoses;
   final VoidCallback? onSaveCompleted;
   final void Function(String error)? onSaveFailed;
 
-  const AddScheduleScreen({
+  const CaretakerAddScheduleScreen({
     super.key,
     required this.medicationId,
     required this.medicationName,
+    required this.patientId,
+    required this.patientName,
     this.onOptimisticDoses,
     this.onSaveCompleted,
     this.onSaveFailed,
   });
 
   @override
-  State<AddScheduleScreen> createState() => _AddScheduleScreenState();
+  State<CaretakerAddScheduleScreen> createState() =>
+      _CaretakerAddScheduleScreenState();
 }
 
-class _AddScheduleScreenState extends State<AddScheduleScreen> {
+class _CaretakerAddScheduleScreenState
+    extends State<CaretakerAddScheduleScreen> {
   String _frequencyType = 'daily';
   List<TimeOfDay> _times = [const TimeOfDay(hour: 8, minute: 0)];
   double _intervalHours = 8;
@@ -42,13 +49,14 @@ class _AddScheduleScreenState extends State<AddScheduleScreen> {
   bool _isLoading = true;
   bool _scheduleSaved = false;
   bool _hasUnsavedChanges = false;
+  bool _hasPermission = false;
+  bool _checkingPermission = true;
 
   MedicationSchedule? _existingSchedule;
-  MedicationSchedule? _originalSchedule; // Track original for change detection
+  MedicationSchedule? _originalSchedule;
 
   final _weekdays = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
 
-  // Track save attempts to prevent duplicates
   DateTime? _lastSaveAttempt;
   static const Duration _saveCooldown = Duration(seconds: 3);
 
@@ -71,13 +79,42 @@ class _AddScheduleScreenState extends State<AddScheduleScreen> {
   @override
   void initState() {
     super.initState();
-    _loadExistingSchedule();
+    _checkPermission();
   }
 
-  /// Load existing schedule from cache first, then from database
+  Future<void> _checkPermission() async {
+    try {
+      final canEdit = await CareRelationshipService.instance
+          .canEditMedications(widget.patientId);
+
+      if (mounted) {
+        setState(() {
+          _hasPermission = canEdit;
+          _checkingPermission = false;
+        });
+
+        if (!canEdit) {
+          AppSnackbar.error(
+            context,
+            'You do not have permission to manage schedules for this patient.',
+          );
+          Navigator.pop(context);
+        } else {
+          _loadExistingSchedule();
+        }
+      }
+    } catch (e) {
+      debugPrint('Error checking permission: $e');
+      if (mounted) {
+        setState(() => _checkingPermission = false);
+        AppSnackbar.error(context, 'Failed to check permissions.');
+        Navigator.pop(context);
+      }
+    }
+  }
+
   Future<void> _loadExistingSchedule() async {
     try {
-      // 1. Try cache first (instant)
       final cachedSchedules = await LocalCacheService.instance
           .getCachedSchedulesForMedication(widget.medicationId);
 
@@ -86,7 +123,7 @@ class _AddScheduleScreenState extends State<AddScheduleScreen> {
         if (mounted) {
           setState(() {
             _existingSchedule = existing;
-            _originalSchedule = existing; // Store original for change detection
+            _originalSchedule = existing;
             _frequencyType = existing.frequencyType;
             _escalationEnabled = existing.escalationEnabled;
             if (existing.scheduledTimes != null) {
@@ -102,7 +139,6 @@ class _AddScheduleScreenState extends State<AddScheduleScreen> {
         return;
       }
 
-      // 2. Fetch from database
       final schedules = await ScheduleService.instance
           .getSchedulesForMedication(widget.medicationId);
 
@@ -111,7 +147,7 @@ class _AddScheduleScreenState extends State<AddScheduleScreen> {
         if (mounted) {
           setState(() {
             _existingSchedule = existing;
-            _originalSchedule = existing; // Store original for change detection
+            _originalSchedule = existing;
             _frequencyType = existing.frequencyType;
             _escalationEnabled = existing.escalationEnabled;
             if (existing.scheduledTimes != null) {
@@ -133,14 +169,9 @@ class _AddScheduleScreenState extends State<AddScheduleScreen> {
     }
   }
 
-  /// Check if there are unsaved changes
   bool _hasChanges() {
-    if (_originalSchedule == null) {
-      // New schedule - always has changes if any data is set
-      return true;
-    }
+    if (_originalSchedule == null) return true;
 
-    // Compare with original
     return _frequencyType != _originalSchedule!.frequencyType ||
         _escalationEnabled != _originalSchedule!.escalationEnabled ||
         _intervalHours != (_originalSchedule!.intervalHours ?? 8.0) ||
@@ -148,7 +179,6 @@ class _AddScheduleScreenState extends State<AddScheduleScreen> {
         !_listsEqual(_selectedDays, _originalSchedule!.scheduledDays ?? []);
   }
 
-  /// Compare two lists for equality
   bool _listsEqual<T>(List<T> a, List<T> b) {
     if (a.length != b.length) return false;
     for (int i = 0; i < a.length; i++) {
@@ -157,7 +187,6 @@ class _AddScheduleScreenState extends State<AddScheduleScreen> {
     return true;
   }
 
-  /// Mark that changes have been made
   void _markAsChanged() {
     if (!_hasUnsavedChanges) {
       setState(() => _hasUnsavedChanges = true);
@@ -262,7 +291,6 @@ class _AddScheduleScreenState extends State<AddScheduleScreen> {
   List<TodayDose> _buildOptimisticDoses({
     required String dosageDisplay,
     required String? pillImageUrl,
-    required String? patientId,
   }) {
     final today = DateTime.now();
     final doses = <TodayDose>[];
@@ -289,7 +317,7 @@ class _AddScheduleScreenState extends State<AddScheduleScreen> {
         dosageUnit: _parseDosageUnit(dosageDisplay),
         pillImageUrl: pillImageUrl,
         scheduledTime: scheduledTime,
-        patientId: patientId,
+        patientId: widget.patientId,
         isPending: true,
       ));
     }
@@ -307,18 +335,15 @@ class _AddScheduleScreenState extends State<AddScheduleScreen> {
     return parts.length > 1 ? parts.sublist(1).join(' ') : 'dose';
   }
 
-  /// Check if we should allow save (prevent duplicates)
   bool _canSave() {
-    // Check cooldown period
     if (_lastSaveAttempt != null) {
       final timeSinceLastSave = DateTime.now().difference(_lastSaveAttempt!);
       if (timeSinceLastSave < _saveCooldown) {
-        debugPrint(' Save cooldown active. Please wait ${_saveCooldown.inSeconds - timeSinceLastSave.inSeconds}s');
+        debugPrint('Save cooldown active. Please wait ${_saveCooldown.inSeconds - timeSinceLastSave.inSeconds}s');
         return false;
       }
     }
 
-    // Check if already saving
     if (_isSaving) {
       debugPrint('⏳ Save already in progress');
       return false;
@@ -328,13 +353,11 @@ class _AddScheduleScreenState extends State<AddScheduleScreen> {
   }
 
   Future<void> _saveSchedule() async {
-    // Prevent duplicate saves
     if (!_canSave()) {
       AppSnackbar.warning(context, 'Please wait a moment before saving again');
       return;
     }
 
-    // Validation
     if ((_frequencyType == 'daily' || _frequencyType == 'multiple_daily') && _times.isEmpty) {
       AppSnackbar.error(context, 'Please add at least one time');
       return;
@@ -345,7 +368,6 @@ class _AddScheduleScreenState extends State<AddScheduleScreen> {
       return;
     }
 
-    // Check if there are actual changes
     if (_existingSchedule != null && !_hasChanges()) {
       AppSnackbar.info(context, 'No changes to save');
       Navigator.pop(context, false);
@@ -358,7 +380,7 @@ class _AddScheduleScreenState extends State<AddScheduleScreen> {
     });
 
     try {
-      debugPrint(' Starting schedule save for medication: ${widget.medicationId}');
+      debugPrint('Starting caretaker schedule save for medication: ${widget.medicationId}');
 
       final medication = await MedicationService.instance.getMedicationById(widget.medicationId);
 
@@ -374,21 +396,17 @@ class _AddScheduleScreenState extends State<AddScheduleScreen> {
 
       final dosageDisplay = medication.displayDosage;
       final pillImageUrl = medication.pillImageUrl;
-      final patientId = medication.patientId;
 
       debugPrint('💊 Medication loaded: ${medication.genericName}');
 
-      // Build optimistic doses
       final optimisticDoses = _buildOptimisticDoses(
         dosageDisplay: dosageDisplay,
         pillImageUrl: pillImageUrl,
-        patientId: patientId,
       );
 
-      debugPrint('📊 Built ${optimisticDoses.length} optimistic doses');
+      debugPrint(' Built ${optimisticDoses.length} optimistic doses');
       widget.onOptimisticDoses?.call(optimisticDoses);
 
-      // Save to database with duplicate prevention
       MedicationSchedule? savedSchedule;
 
       if (_existingSchedule != null) {
@@ -422,7 +440,6 @@ class _AddScheduleScreenState extends State<AddScheduleScreen> {
 
       debugPrint('✅ Schedule saved successfully: ${savedSchedule?.id}');
 
-      // Cache the saved schedule
       if (savedSchedule != null) {
         await LocalCacheService.instance.cacheSchedule(savedSchedule);
         debugPrint('💾 Schedule cached locally');
@@ -431,29 +448,27 @@ class _AddScheduleScreenState extends State<AddScheduleScreen> {
       setState(() {
         _scheduleSaved = true;
         _hasUnsavedChanges = false;
-        _originalSchedule = savedSchedule; // Update original to prevent future "unsaved changes" warnings
+        _originalSchedule = savedSchedule;
       });
 
       if (mounted) {
         AppSnackbar.success(
           context,
-          _existingSchedule != null ? 'Schedule updated!' : 'Schedule saved!',
+          _existingSchedule != null ? 'Schedule updated for ${widget.patientName}!' : 'Schedule saved for ${widget.patientName}!',
         );
 
-        // Small delay to let user see success message
         await Future.delayed(const Duration(milliseconds: 500));
 
         Navigator.pop(context, true);
       }
 
       widget.onSaveCompleted?.call();
-      debugPrint('✅ Schedule save flow completed successfully');
+      debugPrint('✅ Caretaker schedule save flow completed successfully');
 
     } catch (e, stack) {
       debugPrint('❌ Save schedule error: $e');
       debugPrint('Stack: $stack');
 
-      // Check if schedule was actually saved despite error
       final wasActuallySaved = await _checkIfScheduleExists();
 
       if (wasActuallySaved) {
@@ -464,13 +479,12 @@ class _AddScheduleScreenState extends State<AddScheduleScreen> {
         });
 
         if (mounted) {
-          AppSnackbar.success(context, 'Schedule saved!');
+          AppSnackbar.success(context, 'Schedule saved for ${widget.patientName}!');
           await Future.delayed(const Duration(milliseconds: 500));
           Navigator.pop(context, true);
         }
         widget.onSaveCompleted?.call();
       } else {
-        // Actually failed
         if (mounted) {
           setState(() => _isSaving = false);
           AppSnackbar.error(context, 'Failed to save schedule. Please try again.');
@@ -480,7 +494,6 @@ class _AddScheduleScreenState extends State<AddScheduleScreen> {
     }
   }
 
-  /// Check if schedule was actually saved to database
   Future<bool> _checkIfScheduleExists() async {
     try {
       final schedules = await ScheduleService.instance
@@ -492,7 +505,6 @@ class _AddScheduleScreenState extends State<AddScheduleScreen> {
     }
   }
 
-  /// Handle back button with unsaved changes warning
   Future<bool> _handleBackButton() async {
     if (_isSaving) {
       AppSnackbar.warning(context, 'Please wait for save to complete');
@@ -527,6 +539,29 @@ class _AddScheduleScreenState extends State<AddScheduleScreen> {
 
   @override
   Widget build(BuildContext context) {
+    if (_checkingPermission) {
+      return Scaffold(
+        appBar: AppBar(title: const Text('Set Schedule')),
+        body: const Center(child: CircularProgressIndicator()),
+      );
+    }
+
+    if (!_hasPermission) {
+      return Scaffold(
+        appBar: AppBar(title: const Text('Set Schedule')),
+        body: const Center(
+          child: Column(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              Icon(Icons.lock_outline, size: 64, color: AppColors.error),
+              SizedBox(height: 16),
+              Text('Permission Denied'),
+            ],
+          ),
+        ),
+      );
+    }
+
     if (_isLoading) {
       return Scaffold(
         appBar: AppBar(title: const Text('Set Schedule')),
@@ -557,7 +592,6 @@ class _AddScheduleScreenState extends State<AddScheduleScreen> {
         appBar: AppBar(
           title: Text(_existingSchedule != null ? 'Edit Schedule' : 'Set Schedule'),
           actions: [
-            // Show unsaved changes indicator
             if (_hasUnsavedChanges && !_isSaving)
               Container(
                 margin: const EdgeInsets.only(right: 8),
@@ -575,7 +609,6 @@ class _AddScheduleScreenState extends State<AddScheduleScreen> {
                   ],
                 ),
               ),
-            // Allow user to skip scheduling
             TextButton(
               onPressed: _isSaving ? null : () async {
                 if (_hasUnsavedChanges) {
@@ -612,11 +645,47 @@ class _AddScheduleScreenState extends State<AddScheduleScreen> {
         body: ListView(
           padding: const EdgeInsets.all(20),
           children: [
-            // Medication header
+            // Patient info banner
             Container(
               padding: const EdgeInsets.all(16),
               decoration: BoxDecoration(
                 color: AppColors.primary.withValues(alpha: 0.1),
+                borderRadius: BorderRadius.circular(12),
+              ),
+              child: Row(
+                children: [
+                  Icon(Icons.person_rounded, color: AppColors.primary),
+                  const SizedBox(width: 12),
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          'Schedule for',
+                          style: AppTextStyles.bodySmall.copyWith(
+                            color: AppColors.textSecondary,
+                          ),
+                        ),
+                        Text(
+                          widget.patientName,
+                          style: AppTextStyles.titleMedium.copyWith(
+                            color: AppColors.primary,
+                            fontWeight: FontWeight.w700,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                ],
+              ),
+            ),
+            const SizedBox(height: 16),
+
+            // Medication header
+            Container(
+              padding: const EdgeInsets.all(16),
+              decoration: BoxDecoration(
+                color: AppColors.secondary.withValues(alpha: 0.1),
                 borderRadius: BorderRadius.circular(12),
               ),
               child: Row(
@@ -826,7 +895,6 @@ class _AddScheduleScreenState extends State<AddScheduleScreen> {
 
             const SizedBox(height: 20),
 
-            // Save button with duplicate prevention
             AppButton(
               label: _isSaving
                   ? 'Saving...'
@@ -837,7 +905,6 @@ class _AddScheduleScreenState extends State<AddScheduleScreen> {
             ),
             const SizedBox(height: 20),
 
-            // Helper text
             if (_hasUnsavedChanges)
               Container(
                 padding: const EdgeInsets.all(12),
@@ -1279,7 +1346,7 @@ class _FrequencyOption extends StatelessWidget {
 
 // ══════════════════════════════════════════════════════════════
 // TIME SLOT TILE
-// ═════════════════════════════════════════════════════════════
+// ══════════════════════════════════════════════════════════════
 
 class _TimeSlotTile extends StatelessWidget {
   final TimeOfDay time;

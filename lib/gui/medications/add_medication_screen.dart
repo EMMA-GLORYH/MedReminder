@@ -1,10 +1,10 @@
 // lib/screens/medications/add_medication_screen.dart
 
 import 'dart:typed_data';
-
 import 'package:flutter/material.dart';
 import 'package:image_picker/image_picker.dart';
 
+import '../../services/local_cache_service.dart';
 import '../../services/medication_service.dart';
 import '../../theme/app_colors.dart';
 import '../../theme/app_text_styles.dart';
@@ -43,28 +43,13 @@ class _AddMedicationScreenState extends State<AddMedicationScreen> {
 
   bool _isSaving = false;
   bool _submitted = false;
-
-  // Track if any meds were saved so parent knows to refresh
   bool _anySaved = false;
 
-  final List<String> _dosageUnits = [
-    'mg',
-    'mcg',
-    'g',
-    'ml',
-    'units',
-    'tablets',
-  ];
+  // Generate temp ID for pending medications
+  final String _tempId = 'temp_${DateTime.now().millisecondsSinceEpoch}';
 
-  final List<String> _pillShapes = [
-    'round',
-    'oval',
-    'capsule',
-    'rectangle',
-    'triangle',
-    'other',
-  ];
-
+  final List<String> _dosageUnits = ['mg', 'mcg', 'g', 'ml', 'units', 'tablets'];
+  final List<String> _pillShapes = ['round', 'oval', 'capsule', 'rectangle', 'triangle', 'other'];
   final List<Map<String, dynamic>> _pillColors = [
     {'name': 'white', 'color': Colors.white},
     {'name': 'blue', 'color': Colors.blue},
@@ -78,11 +63,8 @@ class _AddMedicationScreenState extends State<AddMedicationScreen> {
   ];
 
   bool get _hasImage => _selectedImageBytes != null && _selectedImage != null;
-
   bool get _showImageError => _submitted && !_hasImage;
-
   bool get _showColorError => _submitted && _pillColor == null;
-
   bool get _showShapeError => _submitted && _pillShape == null;
 
   @override
@@ -97,7 +79,6 @@ class _AddMedicationScreenState extends State<AddMedicationScreen> {
 
   void _resetForm() {
     _formKey.currentState?.reset();
-
     _genericNameCtrl.clear();
     _brandNameCtrl.clear();
     _dosageAmountCtrl.clear();
@@ -127,11 +108,9 @@ class _AddMedicationScreenState extends State<AddMedicationScreen> {
       );
 
       if (image == null) return;
-
       final bytes = await image.readAsBytes();
 
       if (!mounted) return;
-
       setState(() {
         _selectedImage = image;
         _selectedImageBytes = bytes;
@@ -144,34 +123,38 @@ class _AddMedicationScreenState extends State<AddMedicationScreen> {
     }
   }
 
-  /// Cached save - validates, navigates immediately, saves in background
+  /// Save medication FIRST, then navigate to schedule
   Future<void> _saveMedication() async {
-    setState(() => _submitted = true);
+    setState(() {
+      _submitted = true;
+      _isSaving = true;
+    });
 
     final formValid = _formKey.currentState?.validate() ?? false;
 
-    if (!formValid) return;
+    if (!formValid) {
+      setState(() => _isSaving = false);
+      return;
+    }
 
     if (!_hasImage) {
       AppSnackbar.error(context, 'Please add a medicine image');
+      setState(() => _isSaving = false);
       return;
     }
 
     if (_pillColor == null) {
       AppSnackbar.error(context, 'Please select pill color');
+      setState(() => _isSaving = false);
       return;
     }
 
     if (_pillShape == null) {
       AppSnackbar.error(context, 'Please select pill shape');
+      setState(() => _isSaving = false);
       return;
     }
 
-    // Prevent double-taps
-    if (_isSaving) return;
-    setState(() => _isSaving = true);
-
-    // Validate numeric fields
     final dosageText = _dosageAmountCtrl.text.trim();
     final dosageAmount = double.tryParse(dosageText);
 
@@ -191,130 +174,78 @@ class _AddMedicationScreenState extends State<AddMedicationScreen> {
       }
     }
 
-    // Capture form data for background save
-    final formData = _MedicationFormData(
-      genericName: _genericNameCtrl.text.trim(),
-      brandName: _brandNameCtrl.text.trim().isEmpty ? null : _brandNameCtrl.text.trim(),
-      dosageAmount: dosageAmount,
-      dosageUnit: _dosageUnit,
-      medicationType: _medicationType,
-      currentQuantity: quantity,
-      pillColor: _pillColor!,
-      pillShape: _pillShape!,
-      notes: _notesCtrl.text.trim().isEmpty ? null : _notesCtrl.text.trim(),
-      imageBytes: _selectedImageBytes!,
-      imageName: _selectedImage!.name,
-    );
-
-    _anySaved = true;
-
-    if (!mounted) return;
-
-    // For scheduled medications, navigate to schedule screen first
-    if (_medicationType == 'scheduled') {
-      AppSnackbar.success(context, 'Medication saved. Now set up schedule.');
-
-      // Navigate immediately, save in background after schedule is set
-      final result = await Navigator.pushReplacement(
-        context,
-        MaterialPageRoute(
-          builder: (_) => AddScheduleScreen(
-            medicationId: 'pending',
-            medicationName: formData.genericName,
-          ),
-        ),
-      );
-
-      if (mounted && result == true) {
-        Navigator.pop(context, true);
-      }
-
-      // Save medication in background after navigation
-      _saveMedicationInBackground(formData);
-    } else {
-      // For non-scheduled, navigate back immediately
-      AppSnackbar.success(context, 'Medication saved!');
-      Navigator.pop(context, true);
-
-      // Save in background
-      _saveMedicationInBackground(formData);
-    }
-  }
-
-  /// Performs the actual save operation in the background
-  Future<void> _saveMedicationInBackground(_MedicationFormData data) async {
     try {
-      // 1. Upload image to Supabase Storage
+      // 1. Upload image FIRST
       final imageUrl = await MedicationService.instance.uploadMedicationImage(
-        bytes: data.imageBytes,
-        fileName: data.imageName,
+        bytes: _selectedImageBytes!,
+        fileName: _selectedImage!.name,
       );
 
-      // 2. Save medication with pill_image_url
-      await MedicationService.instance.addMedication(
-        genericName: data.genericName,
-        brandName: data.brandName,
-        dosageAmount: data.dosageAmount,
-        dosageUnit: data.dosageUnit,
-        medicationType: data.medicationType,
-        currentQuantity: data.currentQuantity,
-        pillColor: data.pillColor,
-        pillShape: data.pillShape,
+      // 2. Save medication to database and get real ID
+      final medication = await MedicationService.instance.addMedication(
+        genericName: _genericNameCtrl.text.trim(),
+        brandName: _brandNameCtrl.text.trim().isEmpty ? null : _brandNameCtrl.text.trim(),
+        dosageAmount: dosageAmount,
+        dosageUnit: _dosageUnit,
+        medicationType: _medicationType,
+        currentQuantity: quantity,
+        pillColor: _pillColor!,
+        pillShape: _pillShape!,
         pillImageUrl: imageUrl,
-        notes: data.notes,
+        notes: _notesCtrl.text.trim().isEmpty ? null : _notesCtrl.text.trim(),
       );
 
-      debugPrint('Medication saved successfully in background');
-    } catch (e) {
-      debugPrint('Background save error: $e');
-      _showBackgroundError('Failed to save medication. Please try again.');
-    }
-  }
+      // 3. Cache locally for instant access
+      await LocalCacheService.instance.cacheMedication(medication);
 
-  void _showBackgroundError(String message) {
-    if (mounted) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Row(
-            children: [
-              const Icon(Icons.error_outline, color: Colors.white),
-              const SizedBox(width: 12),
-              Expanded(child: Text(message)),
-            ],
+      _anySaved = true;
+
+      if (!mounted) return;
+
+      // 4. Navigate based on medication type
+      if (_medicationType == 'scheduled') {
+        AppSnackbar.success(context, 'Medication saved! Now set up the schedule.');
+
+        // Navigate to schedule with REAL medication ID
+        final result = await Navigator.push(
+          context,
+          MaterialPageRoute(
+            builder: (_) => AddScheduleScreen(
+              medicationId: medication.id,
+              medicationName: medication.genericName,
+              onOptimisticDoses: (doses) {
+                // Parent can use this for immediate UI updates
+                debugPrint('📊 ${doses.length} optimistic doses created');
+              },
+              onSaveCompleted: () {
+                debugPrint('✅ Schedule saved successfully');
+              },
+              onSaveFailed: (error) {
+                debugPrint('❌ Schedule save failed: $error');
+              },
+            ),
           ),
-          backgroundColor: Colors.red.shade600,
-          behavior: SnackBarBehavior.floating,
-          duration: const Duration(seconds: 4),
-          action: SnackBarAction(
-            label: 'Retry',
-            textColor: Colors.white,
-            onPressed: _saveMedication,
-          ),
-        ),
-      );
+        );
+
+        if (mounted) {
+          Navigator.pop(context, result == true || _anySaved);
+        }
+      } else {
+        // As-needed medication - no schedule required
+        AppSnackbar.success(context, 'Medication saved successfully!');
+        if (mounted) {
+          Navigator.pop(context, true);
+        }
+      }
+    } catch (e, stack) {
+      debugPrint('❌ Save medication error: $e');
+      debugPrint('$stack');
+
+      if (mounted) {
+        setState(() => _isSaving = false);
+        AppSnackbar.error(context, 'Failed to save medication. Please try again.');
+      }
     }
-  }
-
-  String _friendlyError(String error) {
-    final lower = error.toLowerCase();
-
-    if (lower.contains('rls') || lower.contains('policy')) {
-      return 'Permission denied. Please contact support.';
-    }
-
-    if (lower.contains('storage')) {
-      return 'Could not upload image. Please try again.';
-    }
-
-    if (lower.contains('network') || lower.contains('socket')) {
-      return 'No internet connection.';
-    }
-
-    if (lower.contains('valid') || lower.contains('required')) {
-      return error.replaceAll('Exception: ', '');
-    }
-
-    return 'Failed to save medication. Please try again.';
   }
 
   Future<bool> _onWillPop() async {
@@ -340,9 +271,7 @@ class _AddMedicationScreenState extends State<AddMedicationScreen> {
         body: SafeArea(
           child: Column(
             children: [
-              // ═══════════════════════════════════════════════════
-              // FIXED TOP IMAGE CARD
-              // ═══════════════════════════════════════════════════
+              // Fixed top image card
               Container(
                 color: AppColors.background,
                 padding: const EdgeInsets.fromLTRB(20, 20, 20, 12),
@@ -375,9 +304,7 @@ class _AddMedicationScreenState extends State<AddMedicationScreen> {
                 ),
               ),
 
-              // ═══════════════════════════════════════════════════
-              // SCROLLABLE FORM CONTENT
-              // ═══════════════════════════════════════════════════
+              // Scrollable form content
               Expanded(
                 child: SingleChildScrollView(
                   padding: const EdgeInsets.fromLTRB(20, 12, 20, 20),
@@ -401,15 +328,12 @@ class _AddMedicationScreenState extends State<AddMedicationScreen> {
                             if (v == null || v.trim().isEmpty) {
                               return 'Medication name is required';
                             }
-
                             if (v.trim().length < 2) {
                               return 'Name is too short';
                             }
-
                             return null;
                           },
                         ),
-
                         const SizedBox(height: 16),
 
                         AppTextField(
@@ -418,16 +342,12 @@ class _AddMedicationScreenState extends State<AddMedicationScreen> {
                           hint: 'e.g. Tylenol',
                           prefixIcon: Icons.label_outline,
                           validator: (v) {
-                            if (v != null &&
-                                v.trim().isNotEmpty &&
-                                v.trim().length < 2) {
+                            if (v != null && v.trim().isNotEmpty && v.trim().length < 2) {
                               return 'Brand name is too short';
                             }
-
                             return null;
                           },
                         ),
-
                         const SizedBox(height: 16),
 
                         Row(
@@ -439,21 +359,11 @@ class _AddMedicationScreenState extends State<AddMedicationScreen> {
                                 label: 'Dosage',
                                 hint: '500',
                                 prefixIcon: Icons.scale_outlined,
-                                keyboardType:
-                                const TextInputType.numberWithOptions(
-                                  decimal: true,
-                                ),
+                                keyboardType: const TextInputType.numberWithOptions(decimal: true),
                                 validator: (v) {
-                                  if (v == null || v.trim().isEmpty) {
-                                    return 'Required';
-                                  }
-
+                                  if (v == null || v.trim().isEmpty) return 'Required';
                                   final amount = double.tryParse(v.trim());
-
-                                  if (amount == null || amount <= 0) {
-                                    return 'Invalid';
-                                  }
-
+                                  if (amount == null || amount <= 0) return 'Invalid';
                                   return null;
                                 },
                               ),
@@ -472,7 +382,6 @@ class _AddMedicationScreenState extends State<AddMedicationScreen> {
                             ),
                           ],
                         ),
-
                         const SizedBox(height: 24),
 
                         _SectionHeader(
@@ -489,9 +398,7 @@ class _AddMedicationScreenState extends State<AddMedicationScreen> {
                                 icon: Icons.schedule_rounded,
                                 description: 'Fixed times daily',
                                 selected: _medicationType == 'scheduled',
-                                onTap: () => setState(
-                                      () => _medicationType = 'scheduled',
-                                ),
+                                onTap: () => setState(() => _medicationType = 'scheduled'),
                               ),
                             ),
                             const SizedBox(width: 12),
@@ -501,14 +408,11 @@ class _AddMedicationScreenState extends State<AddMedicationScreen> {
                                 icon: Icons.medical_services_rounded,
                                 description: 'When symptoms appear',
                                 selected: _medicationType == 'prn',
-                                onTap: () => setState(
-                                      () => _medicationType = 'prn',
-                                ),
+                                onTap: () => setState(() => _medicationType = 'prn'),
                               ),
                             ),
                           ],
                         ),
-
                         const SizedBox(height: 24),
 
                         _SectionHeader(
@@ -516,7 +420,6 @@ class _AddMedicationScreenState extends State<AddMedicationScreen> {
                           title: 'Pill Identification',
                           subtitle: 'Required for future camera verification',
                         ),
-
                         const SizedBox(height: 12),
 
                         Text('Color', style: AppTextStyles.labelLarge),
@@ -527,15 +430,12 @@ class _AddMedicationScreenState extends State<AddMedicationScreen> {
                           runSpacing: 10,
                           children: _pillColors.map((c) {
                             final selected = _pillColor == c['name'];
-
                             return _ColorChip(
                               color: c['color'] as Color,
                               name: c['name'] as String,
                               selected: selected,
                               onTap: () {
-                                setState(
-                                      () => _pillColor = c['name'] as String,
-                                );
+                                setState(() => _pillColor = c['name'] as String);
                               },
                             );
                           }).toList(),
@@ -552,7 +452,6 @@ class _AddMedicationScreenState extends State<AddMedicationScreen> {
                               ),
                             ),
                           ),
-
                         const SizedBox(height: 16),
 
                         Text('Shape', style: AppTextStyles.labelLarge),
@@ -563,7 +462,6 @@ class _AddMedicationScreenState extends State<AddMedicationScreen> {
                           runSpacing: 8,
                           children: _pillShapes.map((s) {
                             final selected = _pillShape == s;
-
                             return _ShapeChip(
                               label: s,
                               selected: selected,
@@ -583,7 +481,6 @@ class _AddMedicationScreenState extends State<AddMedicationScreen> {
                               ),
                             ),
                           ),
-
                         const SizedBox(height: 24),
 
                         _SectionHeader(
@@ -601,17 +498,11 @@ class _AddMedicationScreenState extends State<AddMedicationScreen> {
                           keyboardType: TextInputType.number,
                           validator: (v) {
                             if (v == null || v.trim().isEmpty) return null;
-
                             final qty = int.tryParse(v.trim());
-
-                            if (qty == null || qty < 0) {
-                              return 'Enter a valid quantity';
-                            }
-
+                            if (qty == null || qty < 0) return 'Enter a valid quantity';
                             return null;
                           },
                         ),
-
                         const SizedBox(height: 16),
 
                         AppTextField(
@@ -624,11 +515,9 @@ class _AddMedicationScreenState extends State<AddMedicationScreen> {
                             if (v != null && v.trim().length > 300) {
                               return 'Notes must be under 300 characters';
                             }
-
                             return null;
                           },
                         ),
-
                         const SizedBox(height: 32),
                       ],
                     ),
@@ -636,9 +525,7 @@ class _AddMedicationScreenState extends State<AddMedicationScreen> {
                 ),
               ),
 
-              // ═══════════════════════════════════════════════════
-              // FIXED BOTTOM SAVE BUTTON
-              // ═══════════════════════════════════════════════════
+              // Fixed bottom save button
               Container(
                 padding: const EdgeInsets.all(20),
                 decoration: BoxDecoration(

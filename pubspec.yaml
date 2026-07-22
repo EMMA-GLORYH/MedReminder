@@ -83,6 +83,7 @@ flutter:
   assets:
 #    - assets/images/
      - assets/.env
+     - assets/images/BG_Image.jpeg
 
   # To add assets to your application, add an assets section, like this:
   # assets:

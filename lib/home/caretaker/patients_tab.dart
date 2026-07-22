@@ -11,7 +11,6 @@ import 'package:mar/theme/app_text_styles.dart';
 import 'package:mar/widgets/empty_state.dart';
 
 import '../../home/patients/history_tab.dart';
-// import '../../home/caretaker/alerts_tab.dart';
 import '../../home/caretaker/patient_medications_screen.dart';
 
 const _kPageSize = 12;
@@ -24,19 +23,16 @@ class PatientsTab extends StatefulWidget {
 }
 
 class _PatientsTabState extends State<PatientsTab> {
-  List<CareRelationship> _patients =
-  <CareRelationship>[];
+  List<CareRelationship> _patients = <CareRelationship>[];
 
   bool _isFirstLoad = true;
   bool _isLoadingMore = false;
   bool _hasMore = true;
 
   int _offset = 0;
-  int? _totalCount;
   String? _error;
 
-  final ScrollController _scrollController =
-  ScrollController();
+  final ScrollController _scrollController = ScrollController();
 
   RealtimeChannel? _subscription;
 
@@ -47,11 +43,9 @@ class _PatientsTabState extends State<PatientsTab> {
     _scrollController.addListener(_onScroll);
     _refreshAll();
 
-    _subscription =
-        CareRelationshipService.instance
-            .subscribeToMyInvites(
-          _refreshAll,
-        );
+    _subscription = CareRelationshipService.instance.subscribeToMyInvites(
+      _refreshAll,
+    );
   }
 
   @override
@@ -73,20 +67,11 @@ class _PatientsTabState extends State<PatientsTab> {
     });
 
     try {
-      final results = await Future.wait<Object>([
-        CareRelationshipService.instance
-            .getPatientsIMonitorPage(
-          offset: 0,
-          limit: _kPageSize,
-        ),
-        CareRelationshipService.instance
-            .getActivePatientCount(),
-      ]);
-
-      final firstPage =
-      results[0] as List<CareRelationship>;
-
-      final total = results[1] as int;
+      final firstPage = await CareRelationshipService.instance
+          .getPatientsIMonitorPage(
+        offset: 0,
+        limit: _kPageSize,
+      );
 
       if (!mounted) return;
 
@@ -94,7 +79,6 @@ class _PatientsTabState extends State<PatientsTab> {
         _patients = firstPage;
         _offset = firstPage.length;
         _hasMore = firstPage.length == _kPageSize;
-        _totalCount = total;
         _isFirstLoad = false;
       });
     } catch (error, stack) {
@@ -109,9 +93,7 @@ class _PatientsTabState extends State<PatientsTab> {
         _isFirstLoad = false;
 
         if (_patients.isEmpty) {
-          _error = error
-              .toString()
-              .replaceAll('Exception: ', '');
+          _error = error.toString().replaceAll('Exception: ', '');
         }
       });
     }
@@ -125,8 +107,7 @@ class _PatientsTabState extends State<PatientsTab> {
     });
 
     try {
-      final next =
-      await CareRelationshipService.instance
+      final next = await CareRelationshipService.instance
           .getPatientsIMonitorPage(
         offset: _offset,
         limit: _kPageSize,
@@ -164,8 +145,7 @@ class _PatientsTabState extends State<PatientsTab> {
     const threshold = 300.0;
     final position = _scrollController.position;
 
-    if (position.pixels >=
-        position.maxScrollExtent - threshold) {
+    if (position.pixels >= position.maxScrollExtent - threshold) {
       _loadMore();
     }
   }
@@ -181,8 +161,7 @@ class _PatientsTabState extends State<PatientsTab> {
           behavior: SnackBarBehavior.floating,
           backgroundColor: AppColors.warning,
           content: Text(
-            'You are not permitted to $action for '
-                '${patient.displayName}.',
+            'You are not permitted to $action for ${patient.displayName}.',
             style: const TextStyle(
               color: Colors.white,
               fontWeight: FontWeight.w600,
@@ -238,29 +217,6 @@ class _PatientsTabState extends State<PatientsTab> {
     );
   }
 
-  // void _openPatientAlerts(
-  //     BuildContext context,
-  //     CareRelationship patient,
-  //     ) {
-  //   if (!patient.canReceiveAlerts) {
-  //     _showPermissionDenied(
-  //       action: 'view SOS alerts',
-  //       patient: patient,
-  //     );
-  //     return;
-  //   }
-  //
-  //   Navigator.push(
-  //     context,
-  //     MaterialPageRoute<void>(
-  //       builder: (_) => AlertsTab(
-  //         patientId: patient.patientId,
-  //         patientName: patient.displayName,
-  //       ),
-  //     ),
-  //   );
-  // }
-
   @override
   Widget build(BuildContext context) {
     if (_isFirstLoad) {
@@ -279,15 +235,13 @@ class _PatientsTabState extends State<PatientsTab> {
         color: AppColors.primary,
         onRefresh: _refreshAll,
         child: ListView(
-          physics:
-          const AlwaysScrollableScrollPhysics(),
+          physics: const AlwaysScrollableScrollPhysics(),
           children: const [
             SizedBox(height: 60),
             EmptyState(
               icon: Icons.people_outline_rounded,
               title: 'No patients linked yet',
-              message:
-              'Ask a patient to invite you from their app.\n'
+              message: 'Ask a patient to invite you from their app.\n'
                   'Once linked, they will appear here.',
             ),
           ],
@@ -295,33 +249,22 @@ class _PatientsTabState extends State<PatientsTab> {
       );
     }
 
-    final itemCount =
-        _patients.length + (_hasMore ? 1 : 0);
+    final itemCount = _patients.length + (_hasMore ? 1 : 0);
 
     return RefreshIndicator(
       color: AppColors.primary,
       onRefresh: _refreshAll,
       child: ListView.separated(
         controller: _scrollController,
-        padding: const EdgeInsets.fromLTRB(
-          16,
-          16,
-          16,
-          24,
-        ),
+        padding: const EdgeInsets.fromLTRB(16, 16, 16, 24),
         itemCount: itemCount,
-        separatorBuilder: (_, __) =>
-        const SizedBox(height: 12),
+        separatorBuilder: (_, __) => const SizedBox(height: 12),
         itemBuilder: (context, index) {
           if (index == 0) {
             return Column(
-              crossAxisAlignment:
-              CrossAxisAlignment.start,
+              crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                _PatientsHeader(
-                  total:
-                  _totalCount ?? _patients.length,
-                ),
+                _PatientsHeader(),
                 const SizedBox(height: 12),
                 _PatientCard(
                   patient: _patients[index],
@@ -334,16 +277,13 @@ class _PatientsTabState extends State<PatientsTab> {
 
           if (index >= _patients.length) {
             return Padding(
-              padding: const EdgeInsets.symmetric(
-                vertical: 20,
-              ),
+              padding: const EdgeInsets.symmetric(vertical: 20),
               child: Center(
                 child: _isLoadingMore
                     ? const SizedBox(
                   width: 22,
                   height: 22,
-                  child:
-                  CircularProgressIndicator(
+                  child: CircularProgressIndicator(
                     strokeWidth: 2.4,
                   ),
                 )
@@ -366,45 +306,15 @@ class _PatientsTabState extends State<PatientsTab> {
 }
 
 // ══════════════════════════════════════════════════════════════
-// HEADER
+// HEADER (WITHOUT COUNT)
 // ══════════════════════════════════════════════════════════════
 
 class _PatientsHeader extends StatelessWidget {
-  final int total;
-
-  const _PatientsHeader({
-    required this.total,
-  });
-
   @override
   Widget build(BuildContext context) {
-    return Row(
-      children: [
-        Text(
-          'Your Patients',
-          style: AppTextStyles.h2,
-        ),
-        const SizedBox(width: 8),
-        Container(
-          padding: const EdgeInsets.symmetric(
-            horizontal: 9,
-            vertical: 3,
-          ),
-          decoration: BoxDecoration(
-            color: AppColors.primary.withValues(
-              alpha: 0.12,
-            ),
-            borderRadius: BorderRadius.circular(20),
-          ),
-          child: Text(
-            '$total',
-            style: AppTextStyles.labelSmall.copyWith(
-              color: AppColors.primary,
-              fontWeight: FontWeight.bold,
-            ),
-          ),
-        ),
-      ],
+    return Text(
+      'Your Patients',
+      style: AppTextStyles.h2,
     );
   }
 }

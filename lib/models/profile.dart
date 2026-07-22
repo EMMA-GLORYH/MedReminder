@@ -12,6 +12,8 @@ class Profile {
   final DateTime createdAt;
   final DateTime updatedAt;
 
+  String? firstName;
+
   Profile({
     required this.id,
     required this.fullName,

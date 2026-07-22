@@ -14,8 +14,7 @@ import 'medication_tts_service.dart';
 class DoseLogService {
   DoseLogService._();
 
-  static final DoseLogService instance =
-  DoseLogService._();
+  static final DoseLogService instance = DoseLogService._();
 
   static const String _pendingLogsPreferenceKey =
       'pending_dose_logs_v1';
@@ -26,18 +25,6 @@ class DoseLogService {
   // MARK AS TAKEN
   // ══════════════════════════════════════════════════════════════
 
-  /// Marks a dose as taken.
-  ///
-  /// The action is persisted locally before any network operation. This
-  /// allows the medication reminder to be confirmed while:
-  ///
-  /// - The user is logged out.
-  /// - The device is offline.
-  /// - Supabase is temporarily unavailable.
-  /// - The app was opened directly by a native medication alarm.
-  ///
-  /// [patientId] should be supplied from the alarm payload when possible.
-  /// Existing callers can omit it for backward compatibility.
   Future<void> markAsTaken({
     required String scheduleId,
     required String medicationId,
@@ -71,7 +58,6 @@ class DoseLogService {
             currentUserId;
 
     final now = DateTime.now();
-
     final deviationMinutes =
         now.difference(scheduledFor).inMinutes;
 
@@ -88,10 +74,6 @@ class DoseLogService {
       status: status,
     );
 
-    /*
-     * Save locally first. The screen must not report success unless the
-     * dose acknowledgement has been stored somewhere durable.
-     */
     await _storePendingLog(pendingLog);
 
     debugPrint(
@@ -99,22 +81,8 @@ class DoseLogService {
           '${pendingLog.uniqueKey}',
     );
 
-    /*
-     * Stop the active native alert immediately. This stops:
-     *
-     * - TTS
-     * - alarm.mp3
-     * - vibration
-     * - physical camera flashlight
-     * - foreground service
-     */
     await MedicationTtsService.instance.stop();
 
-    /*
-     * Cancel future/native/visual alarms for this dose and remove its
-     * cached alarm payload. Failure here must not discard the locally
-     * recorded dose acknowledgement.
-     */
     try {
       await LocalNotificationService.instance.cancelDose(
         scheduleId: safeScheduleId,
@@ -132,17 +100,10 @@ class DoseLogService {
       debugPrint('$stack');
     }
 
-    /*
-     * Do not keep the reminder screen waiting for network access.
-     * The local record is already durable, so synchronization can continue
-     * in the background and can be retried after login.
-     */
     if (currentUserId != null &&
         (expectedPatientId == null ||
             expectedPatientId == currentUserId)) {
-      unawaited(
-        syncPendingDoseLogs(),
-      );
+      unawaited(syncPendingDoseLogs());
     }
   }
 
@@ -222,25 +183,16 @@ class DoseLogService {
     if (currentUserId != null &&
         (expectedPatientId == null ||
             expectedPatientId == currentUserId)) {
-      unawaited(
-        syncPendingDoseLogs(),
-      );
+      unawaited(syncPendingDoseLogs());
     }
   }
 
   // ══════════════════════════════════════════════════════════════
-  // SYNCHRONIZE LOCALLY PENDING LOGS
+  // SYNC PENDING
   // ══════════════════════════════════════════════════════════════
 
-  /// Uploads locally saved dose acknowledgements for the currently
-  /// authenticated patient.
-  ///
-  /// Call this after login/session restoration and whenever connectivity
-  /// returns. It is safe to call repeatedly.
   Future<void> syncPendingDoseLogs() async {
-    if (_isSynchronizing) {
-      return;
-    }
+    if (_isSynchronizing) return;
 
     final currentUserId =
         AuthService.instance.currentUser?.id;
@@ -256,12 +208,9 @@ class DoseLogService {
     _isSynchronizing = true;
 
     try {
-      final pendingLogs =
-      await _readPendingLogs();
+      final pendingLogs = await _readPendingLogs();
 
-      if (pendingLogs.isEmpty) {
-        return;
-      }
+      if (pendingLogs.isEmpty) return;
 
       debugPrint(
         '🔄 Synchronizing ${pendingLogs.length} '
@@ -269,9 +218,6 @@ class DoseLogService {
       );
 
       for (final pendingLog in pendingLogs) {
-        /*
-         * Never upload a dose explicitly owned by a different account.
-         */
         if (pendingLog.patientId != null &&
             pendingLog.patientId != currentUserId) {
           debugPrint(
@@ -282,11 +228,6 @@ class DoseLogService {
         }
 
         try {
-          /*
-           * Legacy pending records may not contain patientId. Before using
-           * the current account for such a record, verify that the schedule
-           * belongs to this patient.
-           */
           if (pendingLog.patientId == null) {
             final belongsToCurrentUser =
             await _scheduleBelongsToPatient(
@@ -317,10 +258,6 @@ class DoseLogService {
                 '${pendingLog.uniqueKey}',
           );
         } catch (error, stack) {
-          /*
-           * Keep this entry in SharedPreferences. It can be retried after
-           * connectivity or authentication is restored.
-           */
           debugPrint(
             '⚠️ Pending dose remains queued: '
                 '${pendingLog.uniqueKey}: $error',
@@ -348,10 +285,8 @@ class DoseLogService {
       return data != null;
     } catch (error) {
       debugPrint(
-        '⚠️ Could not verify pending dose ownership: '
-            '$error',
+        '⚠️ Could not verify pending dose ownership: $error',
       );
-
       return false;
     }
   }
@@ -360,11 +295,6 @@ class DoseLogService {
     required _PendingDoseLog pendingLog,
     required String patientId,
   }) async {
-    /*
-     * Check whether the dose was already logged before upsert. This
-     * prevents medication quantity from being decremented more than once
-     * if synchronization is retried after a partial success.
-     */
     final existing = await supabase
         .from('dose_logs')
         .select('id, status')
@@ -396,14 +326,8 @@ class DoseLogService {
       'patient_id,schedule_id,scheduled_for',
     );
 
-    debugPrint(
-      '✅ Dose log saved to Supabase',
-    );
+    debugPrint('✅ Dose log saved to Supabase');
 
-    /*
-     * Schedule metadata is best-effort. The dose log itself is the
-     * authoritative record.
-     */
     if (pendingLog.status == 'taken' ||
         pendingLog.status == 'late') {
       try {
@@ -453,17 +377,13 @@ class DoseLogService {
   }
 
   // ══════════════════════════════════════════════════════════════
-  // CHECK WHETHER A DOSE IS LOGGED
+  // CHECK WHETHER A DOSE IS LOGGED (patient)
   // ══════════════════════════════════════════════════════════════
 
   Future<bool> isDoseLogged({
     required String scheduleId,
     required DateTime scheduledFor,
   }) async {
-    /*
-     * Check local pending data first. This makes the UI immediately reflect
-     * an offline or logged-out acknowledgement.
-     */
     final pendingLogs = await _readPendingLogs();
 
     final locallyLogged = pendingLogs.any(
@@ -476,16 +396,12 @@ class DoseLogService {
               log.status == 'late'),
     );
 
-    if (locallyLogged) {
-      return true;
-    }
+    if (locallyLogged) return true;
 
     final userId =
         AuthService.instance.currentUser?.id;
 
-    if (userId == null) {
-      return false;
-    }
+    if (userId == null) return false;
 
     try {
       final data = await supabase
@@ -508,10 +424,52 @@ class DoseLogService {
 
       return (data as List).isNotEmpty;
     } catch (error) {
-      debugPrint(
-        '❌ Failed to check logged dose: $error',
-      );
+      debugPrint('❌ Failed to check logged dose: $error');
+      return false;
+    }
+  }
 
+  // ══════════════════════════════════════════════════════════════
+  // CHECK WHETHER A PATIENT DOSE IS LOGGED (caretaker)
+  // ══════════════════════════════════════════════════════════════
+
+  Future<bool> isPatientDoseLogged({
+    required String patientId,
+    required String scheduleId,
+    required DateTime scheduledFor,
+  }) async {
+    final safePatientId = patientId.trim();
+    final safeScheduleId = scheduleId.trim();
+
+    if (safePatientId.isEmpty ||
+        safeScheduleId.isEmpty) {
+      return false;
+    }
+
+    try {
+      final data = await supabase
+          .from('dose_logs')
+          .select('id')
+          .eq('patient_id', safePatientId)
+          .eq('schedule_id', safeScheduleId)
+          .eq(
+        'scheduled_for',
+        scheduledFor.toIso8601String(),
+      )
+          .inFilter(
+        'status',
+        const <String>[
+          'taken',
+          'late',
+        ],
+      )
+          .limit(1);
+
+      return (data as List).isNotEmpty;
+    } catch (error) {
+      debugPrint(
+        '❌ Failed to check patient dose log: $error',
+      );
       return false;
     }
   }
@@ -535,12 +493,8 @@ class DoseLogService {
       const Duration(days: 1),
     );
 
-    /*
-     * Include locally acknowledged doses before checking Supabase.
-     */
     try {
-      final pendingLogs =
-      await _readPendingLogs();
+      final pendingLogs = await _readPendingLogs();
 
       for (final log in pendingLogs) {
         if (log.status != 'taken' &&
@@ -567,12 +521,9 @@ class DoseLogService {
       );
     }
 
-    final userId =
-        AuthService.instance.currentUser?.id;
+    final userId = AuthService.instance.currentUser?.id;
 
-    if (userId == null) {
-      return keys;
-    }
+    if (userId == null) return keys;
 
     try {
       final data = await supabase
@@ -611,9 +562,7 @@ class DoseLogService {
         );
       }
     } catch (error, stack) {
-      debugPrint(
-        '❌ Failed to fetch logged doses: $error',
-      );
+      debugPrint('❌ Failed to fetch logged doses: $error');
       debugPrint('$stack');
     }
 
@@ -660,9 +609,7 @@ class DoseLogService {
       final current =
       (data['current_quantity'] as num).toInt();
 
-      if (current <= 0) {
-        return;
-      }
+      if (current <= 0) return;
 
       await supabase
           .from('medications')
@@ -680,9 +627,7 @@ class DoseLogService {
         '✅ Medication quantity decremented',
       );
     } catch (error, stack) {
-      debugPrint(
-        '⚠️ Could not decrement quantity: $error',
-      );
+      debugPrint('⚠️ Could not decrement quantity: $error');
       debugPrint('$stack');
     }
   }
@@ -693,17 +638,12 @@ class DoseLogService {
 
   Future<List<Map<String, dynamic>>>
   getDoseHistory() async {
-    final userId =
-        AuthService.instance.currentUser?.id;
+    final userId = AuthService.instance.currentUser?.id;
 
     if (userId == null) {
       throw Exception('Not logged in');
     }
 
-    /*
-     * Attempt to synchronize locally queued logs before fetching history.
-     * A failed synchronization leaves the records safely queued.
-     */
     await syncPendingDoseLogs();
 
     try {
@@ -716,22 +656,13 @@ class DoseLogService {
         ascending: false,
       );
 
-      return List<Map<String, dynamic>>.from(
-        data,
-      );
+      return List<Map<String, dynamic>>.from(data);
     } catch (error, stack) {
-      debugPrint(
-        '❌ Failed to fetch dose history: $error',
-      );
+      debugPrint('❌ Failed to fetch dose history: $error');
       debugPrint('$stack');
-
       return <Map<String, dynamic>>[];
     }
   }
-
-  // ══════════════════════════════════════════════════════════════
-  // FETCH DOSE HISTORY FOR ONE PATIENT — CARETAKER VIEW
-  // ══════════════════════════════════════════════════════════════
 
   Future<List<Map<String, dynamic>>>
   getDoseHistoryForPatient(
@@ -754,16 +685,9 @@ class DoseLogService {
       );
     }
 
-    /*
-     * Always verify the relationship before loading history.
-     * UI permission checks are useful for user feedback, but this service
-     * check prevents accidental access if the method is called elsewhere.
-     */
     final relationship = await supabase
         .from('care_relationships')
-        .select(
-      'can_view_logs, status',
-    )
+        .select('can_view_logs, status')
         .eq('patient_id', safePatientId)
         .eq('caregiver_id', caregiverId)
         .eq('status', 'active')
@@ -781,19 +705,14 @@ class DoseLogService {
           .from('dose_history_view')
           .select()
           .eq('patient_id', safePatientId)
-          .order(
-        'scheduled_for',
-        ascending: false,
-      );
+          .order('scheduled_for', ascending: false);
 
       debugPrint(
         '✅ Loaded ${data.length} dose-history records '
             'for patient $safePatientId',
       );
 
-      return List<Map<String, dynamic>>.from(
-        data,
-      );
+      return List<Map<String, dynamic>>.from(data);
     } catch (error, stack) {
       debugPrint(
         '❌ Failed to fetch dose history for patient '
@@ -811,14 +730,8 @@ class DoseLogService {
   Future<void> _storePendingLog(
       _PendingDoseLog newLog,
       ) async {
-    final pendingLogs =
-    await _readPendingLogs();
+    final pendingLogs = await _readPendingLogs();
 
-    /*
-     * Replace an existing action for the same patient/schedule/dose.
-     * This allows a later action to supersede a previous local action
-     * without creating duplicate queue entries.
-     */
     pendingLogs.removeWhere(
           (existing) =>
       existing.uniqueKey == newLog.uniqueKey,
@@ -834,8 +747,7 @@ class DoseLogService {
     final preferences =
     await SharedPreferences.getInstance();
 
-    final encoded =
-    preferences.getString(
+    final encoded = preferences.getString(
       _pendingLogsPreferenceKey,
     );
 
@@ -855,9 +767,7 @@ class DoseLogService {
       final logs = <_PendingDoseLog>[];
 
       for (final value in decoded) {
-        if (value is! Map) {
-          continue;
-        }
+        if (value is! Map) continue;
 
         try {
           logs.add(
@@ -867,8 +777,7 @@ class DoseLogService {
           );
         } catch (error) {
           debugPrint(
-            '⚠️ Ignoring malformed pending dose log: '
-                '$error',
+            '⚠️ Ignoring malformed pending dose log: $error',
           );
         }
       }
@@ -876,14 +785,10 @@ class DoseLogService {
       return logs;
     } catch (error, stack) {
       debugPrint(
-        '⚠️ Pending dose-log cache was malformed: '
-            '$error',
+        '⚠️ Pending dose-log cache was malformed: $error',
       );
       debugPrint('$stack');
 
-      /*
-       * Keep a backup for diagnostics, then reset the malformed cache.
-       */
       await preferences.setString(
         '${_pendingLogsPreferenceKey}_corrupt',
         encoded,
@@ -904,11 +809,7 @@ class DoseLogService {
     await SharedPreferences.getInstance();
 
     final encoded = jsonEncode(
-      logs
-          .map(
-            (log) => log.toJson(),
-      )
-          .toList(),
+      logs.map((log) => log.toJson()).toList(),
     );
 
     final saved = await preferences.setString(
@@ -935,9 +836,7 @@ class DoseLogService {
     await _writePendingLogs(logs);
   }
 
-  String? _cleanOptionalString(
-      String? value,
-      ) {
+  String? _cleanOptionalString(String? value) {
     final cleaned = value?.trim();
 
     if (cleaned == null || cleaned.isEmpty) {
@@ -982,8 +881,7 @@ class _PendingDoseLog {
       'scheduleId': scheduleId,
       'medicationId': medicationId,
       'patientId': patientId,
-      'scheduledFor':
-      scheduledFor.toIso8601String(),
+      'scheduledFor': scheduledFor.toIso8601String(),
       'loggedAt': loggedAt.toIso8601String(),
       'status': status,
       'notes': notes,
@@ -1002,8 +900,7 @@ class _PendingDoseLog {
     final rawScheduledFor =
     json['scheduledFor']?.toString();
 
-    final rawLoggedAt =
-    json['loggedAt']?.toString();
+    final rawLoggedAt = json['loggedAt']?.toString();
 
     final status =
         json['status']?.toString().trim() ?? '';
@@ -1021,15 +918,13 @@ class _PendingDoseLog {
     return _PendingDoseLog(
       scheduleId: scheduleId,
       medicationId: medicationId,
-      patientId:
-      _optionalStringFromJson(json['patientId']),
-      scheduledFor:
-      DateTime.parse(rawScheduledFor),
+      patientId: _optionalStringFromJson(
+        json['patientId'],
+      ),
+      scheduledFor: DateTime.parse(rawScheduledFor),
       loggedAt: DateTime.parse(rawLoggedAt),
       status: status,
-      notes: _optionalStringFromJson(
-        json['notes'],
-      ),
+      notes: _optionalStringFromJson(json['notes']),
     );
   }
 

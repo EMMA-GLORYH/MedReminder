@@ -30,11 +30,11 @@ class TodaysSchedule extends StatefulWidget {
   });
 
   @override
-  State<TodaysSchedule> createState() =>
-      TodaysScheduleState();
+  State<TodaysSchedule> createState() => TodaysScheduleState();
 }
 
-class TodaysScheduleState extends State<TodaysSchedule> {
+class TodaysScheduleState extends State<TodaysSchedule>
+    with WidgetsBindingObserver {
   final Set<String> _loggedKeys = <String>{};
 
   late final PageController _pageController;
@@ -45,15 +45,35 @@ class TodaysScheduleState extends State<TodaysSchedule> {
   String? _error;
   int _currentDoseIndex = 0;
 
+  // ══════════════════════════════════════════════════════════════
+  // REALTIME + POLLING STATE
+  // ══════════════════════════════════════════════════════════════
+
   RealtimeChannel? _scheduleChannel;
   RealtimeChannel? _doseLogChannel;
 
   Timer? _realtimeDebounce;
+  Timer? _reconnectTimer;
+  Timer? _pollingTimer;
+
   bool _realtimeReloadInProgress = false;
+  bool _isSubscribed = false;
+  bool _scheduleChannelReady = false;
+  bool _doseLogChannelReady = false;
+
+  int _reconnectAttempts = 0;
+  static const int _maxReconnectAttempts = 3;
+
+  // Once we know Realtime is not available, stop trying and fall back to polling.
+  bool _realtimeUnavailable = false;
+
+  static const Duration _pollingInterval = Duration(seconds: 15);
 
   @override
   void initState() {
     super.initState();
+
+    WidgetsBinding.instance.addObserver(this);
 
     _pageController = PageController(
       viewportFraction: 0.88,
@@ -65,53 +85,63 @@ class TodaysScheduleState extends State<TodaysSchedule> {
 
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+
     _realtimeDebounce?.cancel();
+    _reconnectTimer?.cancel();
+    _pollingTimer?.cancel();
 
-    final scheduleChannel = _scheduleChannel;
-    if (scheduleChannel != null) {
-      unawaited(
-        Supabase.instance.client.removeChannel(
-          scheduleChannel,
-        ),
-      );
-    }
-
-    final doseLogChannel = _doseLogChannel;
-    if (doseLogChannel != null) {
-      unawaited(
-        Supabase.instance.client.removeChannel(
-          doseLogChannel,
-        ),
-      );
-    }
+    _unsubscribeFromRealtime();
 
     _pageController.dispose();
 
     super.dispose();
   }
 
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    super.didChangeAppLifecycleState(state);
+
+    if (state == AppLifecycleState.resumed) {
+      debugPrint('📱 App resumed — refreshing schedule');
+
+      unawaited(load(silent: true));
+
+      if (!_realtimeUnavailable &&
+          (!_scheduleChannelReady || !_doseLogChannelReady)) {
+        _scheduleReconnect();
+      }
+    }
+  }
+
   // ══════════════════════════════════════════════════════════════
-  // REALTIME
+  // REALTIME SUBSCRIPTION
   // ══════════════════════════════════════════════════════════════
 
   void _subscribeToRealtime() {
-    final patientId =
-        AuthService.instance.currentUser?.id;
+    if (_realtimeUnavailable) {
+      debugPrint('ℹ️ Realtime unavailable — using polling instead');
+      _startPolling();
+      return;
+    }
 
-    if (patientId == null ||
-        patientId.trim().isEmpty) {
+    final patientId = AuthService.instance.currentUser?.id;
+
+    if (patientId == null || patientId.trim().isEmpty) {
       debugPrint(
-        '⚠️ TodaysSchedule: no patient ID; '
-            'Realtime was not subscribed',
+        '⚠️ TodaysSchedule: no patient ID; Realtime was not subscribed',
       );
+      return;
+    }
+
+    if (_isSubscribed) {
+      debugPrint('ℹ️ Already subscribed to Realtime');
       return;
     }
 
     try {
       _scheduleChannel = Supabase.instance.client
-          .channel(
-        'todays_schedule_$patientId',
-      )
+          .channel('todays_schedule_$patientId')
           .onPostgresChanges(
         event: PostgresChangeEvent.all,
         schema: 'public',
@@ -122,28 +152,21 @@ class TodaysScheduleState extends State<TodaysSchedule> {
           value: patientId,
         ),
         callback: (payload) {
-          debugPrint(
-            '📡 Schedule change received: '
-                '${payload.eventType}',
-          );
-
-          _queueRealtimeReload();
+          debugPrint('📡 [WS] Schedule ${payload.eventType.name}');
+          _handleScheduleChange(payload);
         },
       )
-          .subscribe(
-            (status, error) {
-          debugPrint(
-            '📡 Schedule Realtime status: '
-                '$status'
-                '${error == null ? '' : ' — $error'}',
-          );
-        },
-      );
+          .subscribe((status, error) {
+        _handleSubscriptionStatus(
+          'Schedule',
+          status,
+          error,
+          isSchedule: true,
+        );
+      });
 
       _doseLogChannel = Supabase.instance.client
-          .channel(
-        'todays_dose_logs_$patientId',
-      )
+          .channel('todays_dose_logs_$patientId')
           .onPostgresChanges(
         event: PostgresChangeEvent.all,
         schema: 'public',
@@ -154,29 +177,254 @@ class TodaysScheduleState extends State<TodaysSchedule> {
           value: patientId,
         ),
         callback: (payload) {
-          debugPrint(
-            '📡 Dose-log change received: '
-                '${payload.eventType}',
-          );
-
-          _queueRealtimeReload();
+          debugPrint('📡 [WS] Dose-log ${payload.eventType.name}');
+          _handleDoseLogChange(payload);
         },
       )
-          .subscribe(
-            (status, error) {
-          debugPrint(
-            '📡 Dose-log Realtime status: '
-                '$status'
-                '${error == null ? '' : ' — $error'}',
-          );
-        },
-      );
+          .subscribe((status, error) {
+        _handleSubscriptionStatus(
+          'DoseLog',
+          status,
+          error,
+          isSchedule: false,
+        );
+      });
+
+      _isSubscribed = true;
+      debugPrint('🔌 [WS] Realtime channels created');
     } catch (error, stack) {
-      debugPrint(
-        '❌ TodaysSchedule Realtime error: $error',
-      );
+      debugPrint('❌ TodaysSchedule Realtime error: $error');
       debugPrint('$stack');
+      _fallbackToPolling();
     }
+  }
+
+  void _handleSubscriptionStatus(
+      String channelName,
+      RealtimeSubscribeStatus status,
+      Object? error, {
+        required bool isSchedule,
+      }) {
+    debugPrint(
+      '📡 [WS] $channelName status: ${status.name}'
+          '${error == null ? '' : ' — $error'}',
+    );
+
+    switch (status) {
+      case RealtimeSubscribeStatus.subscribed:
+        if (isSchedule) {
+          _scheduleChannelReady = true;
+        } else {
+          _doseLogChannelReady = true;
+        }
+
+        _reconnectAttempts = 0;
+
+        if (_scheduleChannelReady && _doseLogChannelReady) {
+          _pollingTimer?.cancel();
+          debugPrint('✅ [WS] Both channels connected — polling disabled');
+        }
+
+        if (mounted) setState(() {});
+        break;
+
+      case RealtimeSubscribeStatus.channelError:
+        if (isSchedule) {
+          _scheduleChannelReady = false;
+        } else {
+          _doseLogChannelReady = false;
+        }
+
+        // Check if this is a "Realtime not enabled" error
+        final errorStr = error?.toString() ?? '';
+        if (errorStr.contains('Unable to subscribe') ||
+            errorStr.contains('Realtime is enabled')) {
+          debugPrint(
+            '❌ [WS] Realtime not enabled on server for $channelName. '
+                'Enable in Supabase Dashboard → Database → Replication.',
+          );
+          _fallbackToPolling();
+          return;
+        }
+
+        _scheduleReconnect();
+        break;
+
+      case RealtimeSubscribeStatus.closed:
+      case RealtimeSubscribeStatus.timedOut:
+        if (isSchedule) {
+          _scheduleChannelReady = false;
+        } else {
+          _doseLogChannelReady = false;
+        }
+        _scheduleReconnect();
+        break;
+    }
+  }
+
+  void _unsubscribeFromRealtime() {
+    final scheduleChannel = _scheduleChannel;
+    if (scheduleChannel != null) {
+      unawaited(Supabase.instance.client.removeChannel(scheduleChannel));
+      _scheduleChannel = null;
+    }
+
+    final doseLogChannel = _doseLogChannel;
+    if (doseLogChannel != null) {
+      unawaited(Supabase.instance.client.removeChannel(doseLogChannel));
+      _doseLogChannel = null;
+    }
+
+    _isSubscribed = false;
+    _scheduleChannelReady = false;
+    _doseLogChannelReady = false;
+  }
+
+  void _scheduleReconnect() {
+    if (!mounted || _realtimeUnavailable) return;
+
+    if (_reconnectAttempts >= _maxReconnectAttempts) {
+      debugPrint(
+        '⚠️ [WS] Max reconnect attempts reached — switching to polling',
+      );
+      _fallbackToPolling();
+      return;
+    }
+
+    _reconnectTimer?.cancel();
+
+    final delaySeconds = (1 << _reconnectAttempts).clamp(2, 10);
+    _reconnectAttempts++;
+
+    debugPrint(
+      '🔄 [WS] Reconnect attempt #$_reconnectAttempts in ${delaySeconds}s',
+    );
+
+    _reconnectTimer = Timer(Duration(seconds: delaySeconds), () {
+      if (!mounted || _realtimeUnavailable) return;
+
+      _unsubscribeFromRealtime();
+      _subscribeToRealtime();
+    });
+  }
+
+  void _fallbackToPolling() {
+    if (_realtimeUnavailable) return;
+
+    _realtimeUnavailable = true;
+
+    _reconnectTimer?.cancel();
+    _unsubscribeFromRealtime();
+
+    debugPrint(
+      '🔄 [Polling] Switching to polling mode '
+          '(every ${_pollingInterval.inSeconds}s)',
+    );
+
+    _startPolling();
+
+    if (mounted) setState(() {});
+  }
+
+  void _startPolling() {
+    _pollingTimer?.cancel();
+
+    _pollingTimer = Timer.periodic(_pollingInterval, (_) {
+      if (!mounted) return;
+      debugPrint('🔄 [Polling] Refreshing schedule');
+      unawaited(load(silent: true));
+    });
+  }
+
+  // ══════════════════════════════════════════════════════════════
+  // REALTIME EVENT HANDLERS
+  // ══════════════════════════════════════════════════════════════
+
+  void _handleScheduleChange(PostgresChangePayload payload) {
+    _queueRealtimeReload();
+  }
+
+  void _handleDoseLogChange(PostgresChangePayload payload) {
+    if (!mounted) return;
+
+    try {
+      switch (payload.eventType) {
+        case PostgresChangeEvent.insert:
+        case PostgresChangeEvent.update:
+          _applyDoseLogInsert(payload.newRecord);
+          break;
+
+        case PostgresChangeEvent.delete:
+          _applyDoseLogDelete(payload.oldRecord);
+          break;
+
+        default:
+          _queueRealtimeReload();
+      }
+    } catch (error, stack) {
+      debugPrint('⚠️ Failed to apply dose log change: $error');
+      debugPrint('$stack');
+      _queueRealtimeReload();
+    }
+  }
+
+  void _applyDoseLogInsert(Map<String, dynamic> record) {
+    final scheduleId = record['schedule_id']?.toString();
+    final scheduledForStr = record['scheduled_for']?.toString();
+
+    if (scheduleId == null || scheduledForStr == null) return;
+
+    try {
+      final scheduledFor = DateTime.parse(scheduledForStr).toLocal();
+      final key = _buildDoseKey(scheduleId, scheduledFor);
+
+      if (_loggedKeys.contains(key)) return;
+
+      debugPrint('✅ [WS] Marking dose as taken: $key');
+
+      setState(() {
+        _loggedKeys.add(key);
+        _normalizeCurrentIndex(_displayDoses.length);
+      });
+
+      _jumpToCurrentPage();
+    } catch (error) {
+      debugPrint('⚠️ Could not parse dose log insert: $error');
+    }
+  }
+
+  void _applyDoseLogDelete(Map<String, dynamic> record) {
+    final scheduleId = record['schedule_id']?.toString();
+    final scheduledForStr = record['scheduled_for']?.toString();
+
+    if (scheduleId == null || scheduledForStr == null) return;
+
+    try {
+      final scheduledFor = DateTime.parse(scheduledForStr).toLocal();
+      final key = _buildDoseKey(scheduleId, scheduledFor);
+
+      if (!_loggedKeys.contains(key)) return;
+
+      debugPrint('↩️ [WS] Removing taken mark: $key');
+
+      setState(() {
+        _loggedKeys.remove(key);
+        _normalizeCurrentIndex(_displayDoses.length);
+      });
+
+      _jumpToCurrentPage();
+    } catch (error) {
+      debugPrint('⚠️ Could not parse dose log delete: $error');
+    }
+  }
+
+  String _buildDoseKey(String scheduleId, DateTime time) {
+    return '$scheduleId|'
+        '${time.year}-'
+        '${time.month.toString().padLeft(2, '0')}-'
+        '${time.day.toString().padLeft(2, '0')}T'
+        '${time.hour.toString().padLeft(2, '0')}:'
+        '${time.minute.toString().padLeft(2, '0')}';
   }
 
   void _queueRealtimeReload() {
@@ -187,14 +435,8 @@ class TodaysScheduleState extends State<TodaysSchedule> {
     _realtimeDebounce = Timer(
       const Duration(milliseconds: 350),
           () {
-        if (!mounted ||
-            _realtimeReloadInProgress) {
-          return;
-        }
-
-        unawaited(
-          _reloadAfterRealtimeEvent(),
-        );
+        if (!mounted || _realtimeReloadInProgress) return;
+        unawaited(_reloadAfterRealtimeEvent());
       },
     );
   }
@@ -205,7 +447,6 @@ class TodaysScheduleState extends State<TodaysSchedule> {
     _realtimeReloadInProgress = true;
 
     try {
-      // Silent reload keeps the current schedule visible while refreshing.
       await load(silent: true);
     } finally {
       _realtimeReloadInProgress = false;
@@ -216,9 +457,7 @@ class TodaysScheduleState extends State<TodaysSchedule> {
   // LOAD SCHEDULES
   // ══════════════════════════════════════════════════════════════
 
-  Future<void> load({
-    bool silent = false,
-  }) async {
+  Future<void> load({bool silent = false}) async {
     if (mounted && !silent) {
       setState(() {
         _isLoading = true;
@@ -234,45 +473,26 @@ class TodaysScheduleState extends State<TodaysSchedule> {
         DoseLogService.instance.getLoggedDoseKeys(today),
       ]);
 
-      final doses =
-      List<TodayDose>.from(
-        results[0] as List<TodayDose>,
-      );
-
-      final loggedKeys =
-      Set<String>.from(
-        results[1] as Set<String>,
-      );
+      final doses = List<TodayDose>.from(results[0] as List<TodayDose>);
+      final loggedKeys = Set<String>.from(results[1] as Set<String>);
 
       doses.sort(
-            (first, second) =>
-            first.scheduledTime.compareTo(
-              second.scheduledTime,
-            ),
+            (first, second) => first.scheduledTime.compareTo(second.scheduledTime),
       );
 
       if (!mounted) return;
 
       setState(() {
-        /*
-         * Preserve optimistic doses during a silent realtime reload if
-         * the database has not returned them yet.
-         */
-        final pendingDoses = _allDoses
-            .where((dose) => dose.isPending)
-            .toList();
+        final pendingDoses =
+        _allDoses.where((dose) => dose.isPending).toList();
 
         _allDoses = <TodayDose>[
           ...doses,
           ...pendingDoses.where(
                 (pending) => !doses.any(
                   (saved) =>
-              saved.medicationId ==
-                  pending.medicationId &&
-                  saved.scheduledTime
-                      .isAtSameMomentAs(
-                    pending.scheduledTime,
-                  ),
+              saved.medicationId == pending.medicationId &&
+                  saved.scheduledTime.isAtSameMomentAs(pending.scheduledTime),
             ),
           ),
         ];
@@ -281,9 +501,7 @@ class TodaysScheduleState extends State<TodaysSchedule> {
           ..clear()
           ..addAll(loggedKeys);
 
-        _normalizeCurrentIndex(
-          _displayDoses.length,
-        );
+        _normalizeCurrentIndex(_displayDoses.length);
 
         _isLoading = false;
         _error = null;
@@ -291,14 +509,9 @@ class TodaysScheduleState extends State<TodaysSchedule> {
 
       _jumpToCurrentPage();
 
-      debugPrint(
-        '✅ TodaysSchedule loaded '
-            '${_allDoses.length} dose(s)',
-      );
+      debugPrint('✅ TodaysSchedule loaded ${_allDoses.length} dose(s)');
     } catch (error, stack) {
-      debugPrint(
-        '❌ TodaysSchedule.load() failed: $error',
-      );
+      debugPrint('❌ TodaysSchedule.load() failed: $error');
       debugPrint('$stack');
 
       if (!mounted) return;
@@ -314,9 +527,7 @@ class TodaysScheduleState extends State<TodaysSchedule> {
   // OPTIMISTIC DOSE SUPPORT
   // ══════════════════════════════════════════════════════════════
 
-  void addOptimisticDoses(
-      List<TodayDose> doses,
-      ) {
+  void addOptimisticDoses(List<TodayDose> doses) {
     if (!mounted || doses.isEmpty) return;
 
     setState(() {
@@ -324,60 +535,44 @@ class TodaysScheduleState extends State<TodaysSchedule> {
         _allDoses.removeWhere(
               (existing) =>
           existing.isPending &&
-              existing.medicationId ==
-                  newDose.medicationId &&
-              existing.scheduledTime
-                  .isAtSameMomentAs(
-                newDose.scheduledTime,
-              ),
+              existing.medicationId == newDose.medicationId &&
+              existing.scheduledTime.isAtSameMomentAs(newDose.scheduledTime),
         );
       }
 
       _allDoses.addAll(doses);
 
       _allDoses.sort(
-            (first, second) =>
-            first.scheduledTime.compareTo(
-              second.scheduledTime,
-            ),
+            (first, second) => first.scheduledTime.compareTo(second.scheduledTime),
       );
 
-      _normalizeCurrentIndex(
-        _displayDoses.length,
-      );
+      _normalizeCurrentIndex(_displayDoses.length);
     });
 
     _jumpToCurrentPage();
+
+    // Fallback reload to catch the real DB record if WebSockets are disabled
+    Timer(const Duration(seconds: 2), () {
+      if (mounted) unawaited(load(silent: true));
+    });
   }
 
   void confirmOptimisticDoses() {
-    unawaited(
-      load(silent: true),
-    );
+    unawaited(load(silent: true));
   }
 
-  void removeOptimisticDoses(
-      String medicationId,
-      String errorMessage,
-      ) {
+  void removeOptimisticDoses(String medicationId, String errorMessage) {
     if (!mounted) return;
 
     setState(() {
       _allDoses.removeWhere(
-            (dose) =>
-        dose.isPending &&
-            dose.medicationId == medicationId,
+            (dose) => dose.isPending && dose.medicationId == medicationId,
       );
 
-      _normalizeCurrentIndex(
-        _displayDoses.length,
-      );
+      _normalizeCurrentIndex(_displayDoses.length);
     });
 
-    AppSnackbar.error(
-      context,
-      errorMessage,
-    );
+    AppSnackbar.error(context, errorMessage);
   }
 
   // ══════════════════════════════════════════════════════════════
@@ -401,63 +596,40 @@ class TodaysScheduleState extends State<TodaysSchedule> {
 
   void _jumpToCurrentPage() {
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (!mounted ||
-          !_pageController.hasClients) {
-        return;
-      }
+      if (!mounted || !_pageController.hasClients) return;
 
       try {
-        _pageController.jumpToPage(
-          _currentDoseIndex,
-        );
+        _pageController.jumpToPage(_currentDoseIndex);
       } catch (_) {}
     });
   }
 
   String _doseKey(TodayDose dose) {
-    final time = dose.scheduledTime;
-
-    return '${dose.scheduleId}|'
-        '${time.year}-'
-        '${time.month.toString().padLeft(2, '0')}-'
-        '${time.day.toString().padLeft(2, '0')}T'
-        '${time.hour.toString().padLeft(2, '0')}:'
-        '${time.minute.toString().padLeft(2, '0')}';
+    return _buildDoseKey(dose.scheduleId, dose.scheduledTime);
   }
 
   bool _isDoseTaken(TodayDose dose) {
-    return _loggedKeys.contains(
-      _doseKey(dose),
-    );
+    return _loggedKeys.contains(_doseKey(dose));
   }
 
   bool _isDoseDue(TodayDose dose) {
-    return !DateTime.now().isBefore(
-      dose.scheduledTime,
-    );
+    return !DateTime.now().isBefore(dose.scheduledTime);
   }
 
   String _formatTime(DateTime dateTime) {
     final hour = dateTime.hour;
-    final minute =
-    dateTime.minute.toString().padLeft(2, '0');
+    final minute = dateTime.minute.toString().padLeft(2, '0');
     final period = hour >= 12 ? 'PM' : 'AM';
-    final displayHour =
-    hour == 0 ? 12 : (hour > 12 ? hour - 12 : hour);
+    final displayHour = hour == 0 ? 12 : (hour > 12 ? hour - 12 : hour);
 
     return '$displayHour:$minute $period';
   }
 
   List<TodayDose> get _displayDoses {
-    final doses = _allDoses
-        .where((dose) => !_isDoseTaken(dose))
-        .toList();
+    final doses = _allDoses.where((dose) => !_isDoseTaken(dose)).toList();
 
     doses.sort(
-          (first, second) =>
-          first.scheduledTime.compareTo(
-            second.scheduledTime,
-          ),
+          (first, second) => first.scheduledTime.compareTo(second.scheduledTime),
     );
 
     return doses;
@@ -467,9 +639,7 @@ class TodaysScheduleState extends State<TodaysSchedule> {
   // OPEN DOSE
   // ══════════════════════════════════════════════════════════════
 
-  Future<void> _openDose(
-      TodayDose dose,
-      ) async {
+  Future<void> _openDose(TodayDose dose) async {
     if (dose.isPending) {
       AppSnackbar.error(
         context,
@@ -478,47 +648,31 @@ class TodaysScheduleState extends State<TodaysSchedule> {
       return;
     }
 
-    final localization =
-    AppLocalizations.of(context);
+    final localization = AppLocalizations.of(context);
 
     if (!_isDoseDue(dose)) {
       AppSnackbar.error(
         context,
         localization.t(
           'notDueSnackbar',
-          <String, String>{
-            'time': _formatTime(
-              dose.scheduledTime,
-            ),
-          },
+          <String, String>{'time': _formatTime(dose.scheduledTime)},
         ),
       );
       return;
     }
 
-    final result =
-    await Navigator.of(context).push<bool>(
+    final result = await Navigator.of(context).push<bool>(
       MaterialPageRoute<bool>(
         fullscreenDialog: true,
-        builder: (_) =>
-            MedicationReminderScannerScreen(
-              dose: dose,
-            ),
+        builder: (_) => MedicationReminderScannerScreen(dose: dose),
       ),
     );
 
-    if (result != true || !mounted) {
-      return;
-    }
+    if (result != true || !mounted) return;
 
     setState(() {
-      _loggedKeys.add(
-        _doseKey(dose),
-      );
-
-      _normalizeCurrentIndex(
-        _displayDoses.length,
-      );
+      _loggedKeys.add(_doseKey(dose));
+      _normalizeCurrentIndex(_displayDoses.length);
     });
 
     _jumpToCurrentPage();
@@ -537,30 +691,21 @@ class TodaysScheduleState extends State<TodaysSchedule> {
     }
 
     if (_error != null) {
-      return _ErrorState(
-        message: _error!,
-        onRetry: () => load(),
-      );
+      return _ErrorState(message: _error!, onRetry: () => load());
     }
 
     if (_allDoses.isEmpty) {
-      return _EmptySchedule(
-        onAddPressed: widget.onAddPressed,
-      );
+      return _EmptySchedule(onAddPressed: widget.onAddPressed);
     }
 
     final displayDoses = _displayDoses;
 
-    if (displayDoses.isEmpty ||
-        _allDoses.every(_isDoseTaken)) {
-      return _AllDoneCard(
-        count: _allDoses.length,
-      );
+    if (displayDoses.isEmpty || _allDoses.every(_isDoseTaken)) {
+      return _AllDoneCard(count: _allDoses.length);
     }
 
     return Column(
-      crossAxisAlignment:
-      CrossAxisAlignment.stretch,
+      crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
         SizedBox(
           height: 420,
@@ -600,8 +745,7 @@ class TodaysScheduleState extends State<TodaysSchedule> {
           ),
           const SizedBox(height: 7),
           Text(
-            '${_currentDoseIndex + 1} of '
-                '${displayDoses.length}',
+            '${_currentDoseIndex + 1} of ${displayDoses.length}',
             style: AppTextStyles.labelSmall.copyWith(
               color: AppColors.textSecondary,
               fontWeight: FontWeight.w600,
@@ -630,59 +774,35 @@ class _DoseTile extends StatelessWidget {
   });
 
   bool get _hasImage {
-    return dose.pillImageUrl != null &&
-        dose.pillImageUrl!.trim().isNotEmpty;
+    return dose.pillImageUrl != null && dose.pillImageUrl!.trim().isNotEmpty;
   }
 
   Color get _statusColor {
-    if (dose.isPending) {
-      return AppColors.warning;
-    }
-
-    if (dose.isPast) {
-      return AppColors.error;
-    }
-
-    if (dose.isDueSoon) {
-      return AppColors.warning;
-    }
-
+    if (dose.isPending) return AppColors.warning;
+    if (dose.isPast) return AppColors.error;
+    if (dose.isDueSoon) return AppColors.warning;
     return AppColors.primary;
   }
 
-  String _statusLabel(
-      AppLocalizations localization,
-      ) {
-    if (dose.isPending) {
-      return 'Saving…';
-    }
-
-    if (dose.isPast) {
-      return localization.t('overdue');
-    }
-
-    if (dose.isDueSoon) {
-      return localization.t('dueSoon');
-    }
-
+  String _statusLabel(AppLocalizations localization) {
+    if (dose.isPending) return 'Saving…';
+    if (dose.isPast) return localization.t('overdue');
+    if (dose.isDueSoon) return localization.t('dueSoon');
     return localization.t('upcoming');
   }
 
   String get _timeText {
     final hour = dose.scheduledTime.hour;
-    final minute =
-    dose.scheduledTime.minute.toString().padLeft(2, '0');
+    final minute = dose.scheduledTime.minute.toString().padLeft(2, '0');
     final period = hour >= 12 ? 'PM' : 'AM';
-    final displayHour =
-    hour == 0 ? 12 : (hour > 12 ? hour - 12 : hour);
+    final displayHour = hour == 0 ? 12 : (hour > 12 ? hour - 12 : hour);
 
     return '$displayHour:$minute $period';
   }
 
   @override
   Widget build(BuildContext context) {
-    final localization =
-    AppLocalizations.of(context);
+    final localization = AppLocalizations.of(context);
 
     return Opacity(
       opacity: dose.isPending ? 0.72 : 1,
@@ -703,24 +823,19 @@ class _DoseTile extends StatelessWidget {
               ),
             ),
             child: Column(
-              crossAxisAlignment:
-              CrossAxisAlignment.stretch,
+              crossAxisAlignment: CrossAxisAlignment.stretch,
               children: [
                 SizedBox(
                   height: 220,
                   child: Stack(
                     fit: StackFit.expand,
                     children: [
-                      _DoseImage(
-                        imageUrl: dose.pillImageUrl,
-                      ),
+                      _DoseImage(imageUrl: dose.pillImageUrl),
                       Positioned(
                         top: 12,
                         left: 12,
                         child: _StatusBadge(
-                          label: _statusLabel(
-                            localization,
-                          ),
+                          label: _statusLabel(localization),
                           color: _statusColor,
                         ),
                       ),
@@ -729,10 +844,7 @@ class _DoseTile extends StatelessWidget {
                         right: 12,
                         child: CircleAvatar(
                           radius: 17,
-                          backgroundColor:
-                          Colors.white.withValues(
-                            alpha: 0.90,
-                          ),
+                          backgroundColor: Colors.white.withValues(alpha: 0.90),
                           child: Icon(
                             _hasImage
                                 ? Icons.image_rounded
@@ -747,22 +859,15 @@ class _DoseTile extends StatelessWidget {
                 ),
                 Expanded(
                   child: Padding(
-                    padding: const EdgeInsets.fromLTRB(
-                      16,
-                      14,
-                      16,
-                      6,
-                    ),
+                    padding: const EdgeInsets.fromLTRB(16, 14, 16, 6),
                     child: Column(
-                      crossAxisAlignment:
-                      CrossAxisAlignment.start,
+                      crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
                         Text(
                           dose.medicationName,
                           maxLines: 2,
                           overflow: TextOverflow.ellipsis,
-                          style: AppTextStyles.titleMedium
-                              .copyWith(
+                          style: AppTextStyles.titleMedium.copyWith(
                             fontWeight: FontWeight.w800,
                           ),
                         ),
@@ -772,8 +877,7 @@ class _DoseTile extends StatelessWidget {
                             Expanded(
                               child: Text(
                                 dose.dosageDisplay,
-                                style: AppTextStyles.titleMedium
-                                    .copyWith(
+                                style: AppTextStyles.titleMedium.copyWith(
                                   color: AppColors.secondary,
                                   fontWeight: FontWeight.w800,
                                 ),
@@ -781,8 +885,7 @@ class _DoseTile extends StatelessWidget {
                             ),
                             Text(
                               _timeText,
-                              style: AppTextStyles.bodySmall
-                                  .copyWith(
+                              style: AppTextStyles.bodySmall.copyWith(
                                 color: AppColors.textSecondary,
                                 fontWeight: FontWeight.w700,
                               ),
@@ -794,37 +897,26 @@ class _DoseTile extends StatelessWidget {
                   ),
                 ),
                 Padding(
-                  padding: const EdgeInsets.fromLTRB(
-                    16,
-                    8,
-                    16,
-                    14,
-                  ),
+                  padding: const EdgeInsets.fromLTRB(16, 8, 16, 14),
                   child: Container(
                     height: 42,
                     alignment: Alignment.center,
                     decoration: BoxDecoration(
                       color: dose.isPending
-                          ? AppColors.warning.withValues(
-                        alpha: 0.10,
-                      )
+                          ? AppColors.warning.withValues(alpha: 0.10)
                           : isDue
-                          ? AppColors.primary.withValues(
-                        alpha: 0.13,
-                      )
+                          ? AppColors.primary.withValues(alpha: 0.13)
                           : AppColors.surfaceVariant,
                       borderRadius: BorderRadius.circular(12),
                     ),
                     child: dose.isPending
                         ? Row(
-                      mainAxisAlignment:
-                      MainAxisAlignment.center,
+                      mainAxisAlignment: MainAxisAlignment.center,
                       children: [
                         const SizedBox(
                           width: 14,
                           height: 14,
-                          child:
-                          CircularProgressIndicator(
+                          child: CircularProgressIndicator(
                             strokeWidth: 2,
                             color: AppColors.warning,
                           ),
@@ -832,8 +924,7 @@ class _DoseTile extends StatelessWidget {
                         const SizedBox(width: 8),
                         Text(
                           'Saving…',
-                          style: AppTextStyles.bodySmall
-                              .copyWith(
+                          style: AppTextStyles.bodySmall.copyWith(
                             color: AppColors.warning,
                             fontWeight: FontWeight.w700,
                           ),
@@ -841,8 +932,7 @@ class _DoseTile extends StatelessWidget {
                       ],
                     )
                         : Row(
-                      mainAxisAlignment:
-                      MainAxisAlignment.center,
+                      mainAxisAlignment: MainAxisAlignment.center,
                       children: [
                         Icon(
                           isDue
@@ -856,17 +946,12 @@ class _DoseTile extends StatelessWidget {
                         const SizedBox(width: 7),
                         Text(
                           isDue
-                              ? localization.t(
-                            'tapToMarkTaken',
-                          )
+                              ? localization.t('tapToMarkTaken')
                               : localization.t(
                             'availableAt',
-                            <String, String>{
-                              'time': _timeText,
-                            },
+                            <String, String>{'time': _timeText},
                           ),
-                          style: AppTextStyles.bodySmall
-                              .copyWith(
+                          style: AppTextStyles.bodySmall.copyWith(
                             color: isDue
                                 ? AppColors.primary
                                 : AppColors.textSecondary,
@@ -893,9 +978,7 @@ class _DoseTile extends StatelessWidget {
 class _DoseImage extends StatelessWidget {
   final String? imageUrl;
 
-  const _DoseImage({
-    required this.imageUrl,
-  });
+  const _DoseImage({required this.imageUrl});
 
   @override
   Widget build(BuildContext context) {
@@ -909,17 +992,9 @@ class _DoseImage extends StatelessWidget {
       url,
       fit: BoxFit.cover,
       gaplessPlayback: true,
-      errorBuilder: (_, __, ___) {
-        return const _FallbackDoseImage();
-      },
-      loadingBuilder: (
-          context,
-          child,
-          progress,
-          ) {
-        if (progress == null) {
-          return child;
-        }
+      errorBuilder: (_, __, ___) => const _FallbackDoseImage(),
+      loadingBuilder: (context, child, progress) {
+        if (progress == null) return child;
 
         return const ColoredBox(
           color: AppColors.surfaceVariant,
@@ -961,18 +1036,12 @@ class _StatusBadge extends StatelessWidget {
   final String label;
   final Color color;
 
-  const _StatusBadge({
-    required this.label,
-    required this.color,
-  });
+  const _StatusBadge({required this.label, required this.color});
 
   @override
   Widget build(BuildContext context) {
     return Container(
-      padding: const EdgeInsets.symmetric(
-        horizontal: 10,
-        vertical: 6,
-      ),
+      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
       decoration: BoxDecoration(
         color: color.withValues(alpha: 0.94),
         borderRadius: BorderRadius.circular(10),
@@ -1006,25 +1075,20 @@ class _CarouselIndicator extends StatelessWidget {
   Widget build(BuildContext context) {
     return Row(
       mainAxisAlignment: MainAxisAlignment.center,
-      children: List.generate(
-        itemCount,
-            (index) {
-          final selected = index == currentIndex;
+      children: List.generate(itemCount, (index) {
+        final selected = index == currentIndex;
 
-          return AnimatedContainer(
-            duration: const Duration(milliseconds: 220),
-            margin: const EdgeInsets.symmetric(horizontal: 4),
-            width: selected ? 22 : 8,
-            height: 8,
-            decoration: BoxDecoration(
-              color: selected
-                  ? AppColors.primary
-                  : AppColors.border,
-              borderRadius: BorderRadius.circular(10),
-            ),
-          );
-        },
-      ),
+        return AnimatedContainer(
+          duration: const Duration(milliseconds: 220),
+          margin: const EdgeInsets.symmetric(horizontal: 4),
+          width: selected ? 22 : 8,
+          height: 8,
+          decoration: BoxDecoration(
+            color: selected ? AppColors.primary : AppColors.border,
+            borderRadius: BorderRadius.circular(10),
+          ),
+        );
+      }),
     );
   }
 }
@@ -1036,9 +1100,7 @@ class _CarouselIndicator extends StatelessWidget {
 class _AllDoneCard extends StatelessWidget {
   final int count;
 
-  const _AllDoneCard({
-    required this.count,
-  });
+  const _AllDoneCard({required this.count});
 
   @override
   Widget build(BuildContext context) {
@@ -1062,18 +1124,10 @@ class _AllDoneCard extends StatelessWidget {
             color: AppColors.primary,
           ),
           const SizedBox(height: 12),
-          Text(
-            loc.t('allDoneTitle'),
-            style: AppTextStyles.titleMedium,
-          ),
+          Text(loc.t('allDoneTitle'), style: AppTextStyles.titleMedium),
           const SizedBox(height: 4),
           Text(
-            loc.t(
-              'allDoneBody',
-              <String, String>{
-                'count': '$count',
-              },
-            ),
+            loc.t('allDoneBody', <String, String>{'count': '$count'}),
             style: AppTextStyles.bodySmall,
             textAlign: TextAlign.center,
           ),
@@ -1086,9 +1140,7 @@ class _AllDoneCard extends StatelessWidget {
 class _EmptySchedule extends StatelessWidget {
   final VoidCallback onAddPressed;
 
-  const _EmptySchedule({
-    required this.onAddPressed,
-  });
+  const _EmptySchedule({required this.onAddPressed});
 
   @override
   Widget build(BuildContext context) {
@@ -1110,12 +1162,7 @@ class _EmptySchedule extends StatelessWidget {
             color: AppColors.secondary,
           ),
           const SizedBox(height: 16),
-          Text(
-            loc.t('nothingScheduled'),
-            style: AppLocalizations.of(context) != null
-                ? AppTextStyles.titleMedium
-                : AppTextStyles.titleMedium,
-          ),
+          Text(loc.t('nothingScheduled'), style: AppTextStyles.titleMedium),
           const SizedBox(height: 16),
           TextButton.icon(
             onPressed: onAddPressed,
@@ -1132,10 +1179,7 @@ class _ErrorState extends StatelessWidget {
   final String message;
   final VoidCallback onRetry;
 
-  const _ErrorState({
-    required this.message,
-    required this.onRetry,
-  });
+  const _ErrorState({required this.message, required this.onRetry});
 
   @override
   Widget build(BuildContext context) {
@@ -1174,16 +1218,9 @@ class _ScheduleSkeleton extends StatelessWidget {
   Widget build(BuildContext context) {
     return Column(
       children: [
-        const SkeletonBox(
-          height: 400,
-          borderRadius: 18,
-        ),
+        const SkeletonBox(height: 400, borderRadius: 18),
         const SizedBox(height: 12),
-        SkeletonBox(
-          height: 8,
-          width: 70,
-          borderRadius: 10,
-        ),
+        SkeletonBox(height: 8, width: 70, borderRadius: 10),
       ],
     );
   }
