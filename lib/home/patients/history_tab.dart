@@ -40,20 +40,13 @@ class _HistoryTabState extends State<HistoryTab> {
     });
 
     try {
-      // ✅ FIX: Fallback to current user if patientId is empty
-      String targetPatientId = widget.patientId.trim();
-      if (targetPatientId.isEmpty) {
-        targetPatientId = AuthService.instance.currentUser?.id ?? '';
-      }
+      final isViewingSelf = widget.patientId.trim().isEmpty;
 
-      if (targetPatientId.isEmpty) {
-        throw Exception('Patient ID is missing and no user is logged in');
-      }
+      debugPrint('📊 Loading history (self: $isViewingSelf)');
 
-      debugPrint(' Loading history for patient ID: $targetPatientId');
-
-      final data = await DoseLogService.instance
-          .getDoseHistoryForPatient(targetPatientId);
+      final data = isViewingSelf
+          ? await DoseLogService.instance.getDoseHistory()
+          : await DoseLogService.instance.getDoseHistoryForPatient(widget.patientId);
 
       if (mounted) {
         setState(() {
