@@ -12,46 +12,35 @@ import 'package:mar/services/dose_log_service.dart';
 class AuthService {
   AuthService._internal();
 
-  static final AuthService _instance =
-  AuthService._internal();
+  static final AuthService _instance = AuthService._internal();
 
   static AuthService get instance => _instance;
 
   StreamSubscription<AuthState>? _authSubscription;
   bool _authSyncListenerStarted = false;
 
+  // ✅ NEW: Token refresh tracking
+  DateTime? _lastTokenRefresh;
+  static const Duration _tokenRefreshThreshold = Duration(minutes: 5);
+
   // ══════════════════════════════════════════════════════════════
   // CURRENT SESSION
   // ══════════════════════════════════════════════════════════════
 
-  /// Returns the current Supabase user.
-  ///
-  /// This returns null instead of throwing when Supabase failed to
-  /// initialize. That allows an alarm-opened medication screen to keep
-  /// working independently of backend startup.
   User? get currentUser {
     try {
       return supabase.auth.currentUser;
     } catch (error) {
-      debugPrint(
-        '⚠️ Could not read the current Supabase user: '
-            '$error',
-      );
-
+      debugPrint('⚠️ Could not read the current Supabase user: $error');
       return null;
     }
   }
 
-  /// Returns the current Supabase session, or null if unavailable.
   Session? get currentSession {
     try {
       return supabase.auth.currentSession;
     } catch (error) {
-      debugPrint(
-        '⚠️ Could not read the current Supabase session: '
-            '$error',
-      );
-
+      debugPrint('⚠️ Could not read the current Supabase session: $error');
       return null;
     }
   }
@@ -68,100 +57,94 @@ class AuthService {
   }
 
   // ══════════════════════════════════════════════════════════════
+  // ✅ NEW: TOKEN REFRESH METHODS
+  // ══════════════════════════════════════════════════════════════
+
+  /// Ensures we have a valid token. Refreshes if expiring soon.
+  Future<bool> ensureValidToken() async {
+    try {
+      final session = currentSession;
+      if (session == null) return false;
+
+      final expiresAt = session.expiresAt;
+      if (expiresAt == null) return true;
+
+      final expiryTime = DateTime.fromMillisecondsSinceEpoch(expiresAt * 1000);
+      final timeUntilExpiry = expiryTime.difference(DateTime.now());
+
+      if (timeUntilExpiry.inMinutes < 5) {
+        debugPrint('🔄 Token expiring soon — refreshing...');
+        final response = await supabase.auth.refreshSession();
+        if (response.session != null) {
+          _lastTokenRefresh = DateTime.now();
+          debugPrint('✅ Token refreshed successfully');
+          return true;
+        }
+      }
+      return true;
+    } catch (e) {
+      debugPrint('❌ Token refresh failed: $e');
+      return false;
+    }
+  }
+
+  /// Gets a valid session (refreshes token if needed)
+  Future<Session?> getValidSession() async {
+    await ensureValidToken();
+    return currentSession;
+  }
+
+  // ══════════════════════════════════════════════════════════════
   // PENDING DOSE SYNCHRONIZATION
   // ══════════════════════════════════════════════════════════════
 
-  /// Starts one listener that retries locally queued dose logs whenever
-  /// Supabase reports an authenticated session.
-  ///
-  /// It is safe to call this method more than once.
   void initializePendingDoseSync() {
     _ensurePendingDoseSyncListener();
 
     if (currentSession != null) {
-      _schedulePendingDoseSync(
-        reason: 'existing session',
-      );
+      _schedulePendingDoseSync(reason: 'existing session');
     }
   }
 
   void _ensurePendingDoseSyncListener() {
-    if (_authSyncListenerStarted) {
-      return;
-    }
+    if (_authSyncListenerStarted) return;
 
     try {
       _authSyncListenerStarted = true;
 
-      _authSubscription =
-          supabase.auth.onAuthStateChange.listen(
-                (AuthState authState) {
-              final session = authState.session;
+      _authSubscription = supabase.auth.onAuthStateChange.listen(
+            (AuthState authState) {
+          final session = authState.session;
+          debugPrint('🔐 Supabase auth event: ${authState.event.name}');
 
-              debugPrint(
-                '🔐 Supabase auth event: '
-                    '${authState.event.name}',
-              );
-
-              if (session != null) {
-                _schedulePendingDoseSync(
-                  reason: authState.event.name,
-                );
-              }
-            },
-            onError: (Object error, StackTrace stack) {
-              debugPrint(
-                '⚠️ Authentication state listener failed: '
-                    '$error',
-              );
-              debugPrint('$stack');
-            },
-          );
-
-      debugPrint(
-        '✅ Pending dose synchronization listener started',
+          if (session != null) {
+            _schedulePendingDoseSync(reason: authState.event.name);
+          }
+        },
+        onError: (Object error, StackTrace stack) {
+          debugPrint('⚠️ Authentication state listener failed: $error');
+          debugPrint('$stack');
+        },
       );
+
+      debugPrint('✅ Pending dose synchronization listener started');
     } catch (error, stack) {
-      /*
-       * Supabase may not yet be initialized. Allow a later call to retry
-       * installing the listener.
-       */
       _authSyncListenerStarted = false;
-
-      debugPrint(
-        '⚠️ Could not start authentication listener: '
-            '$error',
-      );
+      debugPrint('⚠️ Could not start authentication listener: $error');
       debugPrint('$stack');
     }
   }
 
-  void _schedulePendingDoseSync({
-    required String reason,
-  }) {
-    debugPrint(
-      '🔄 Scheduling pending dose synchronization: '
-          '$reason',
-    );
-
-    unawaited(
-      _synchronizePendingDoseLogs(),
-    );
+  void _schedulePendingDoseSync({required String reason}) {
+    debugPrint('🔄 Scheduling pending dose synchronization: $reason');
+    unawaited(_synchronizePendingDoseLogs());
   }
 
   Future<void> _synchronizePendingDoseLogs() async {
     try {
-      await DoseLogService.instance
-          .syncPendingDoseLogs();
+      await DoseLogService.instance.syncPendingDoseLogs();
     } catch (error, stack) {
-      /*
-       * Pending logs remain stored locally and can be retried after the
-       * next authentication or app-start event.
-       */
-      debugPrint(
-        '⚠️ Pending dose synchronization failed: '
-            '$error',
-      );
+      debugPrint('⚠️ Pending dose synchronization failed: $error');
       debugPrint('$stack');
     }
   }
@@ -186,29 +169,17 @@ class AuthService {
       data: <String, dynamic>{
         'full_name': fullName.trim(),
         'role': _cleanOptionalString(role),
-        'phone_number':
-        _cleanOptionalString(phoneNumber),
-        'timezone': timezone.trim().isEmpty
-            ? 'UTC'
-            : timezone.trim(),
+        'phone_number': _cleanOptionalString(phoneNumber),
+        'timezone': timezone.trim().isEmpty ? 'UTC' : timezone.trim(),
       },
     );
 
     if (response.user == null) {
-      throw const AuthException(
-        'Signup failed. Please try again.',
-      );
+      throw const AuthException('Signup failed. Please try again.');
     }
 
-    /*
-     * Some Supabase projects require email verification and therefore do
-     * not create a session immediately. Only synchronize when a session
-     * exists.
-     */
     if (response.session != null) {
-      _schedulePendingDoseSync(
-        reason: 'email signup',
-      );
+      _schedulePendingDoseSync(reason: 'email signup');
     }
 
     return response;
@@ -224,22 +195,16 @@ class AuthService {
   }) async {
     _ensurePendingDoseSyncListener();
 
-    final response =
-    await supabase.auth.signInWithPassword(
+    final response = await supabase.auth.signInWithPassword(
       email: email.trim(),
       password: password,
     );
 
     if (response.user == null) {
-      throw const AuthException(
-        'Login failed. Check your credentials.',
-      );
+      throw const AuthException('Login failed. Check your credentials.');
     }
 
-    _schedulePendingDoseSync(
-      reason: 'email login',
-    );
-
+    _schedulePendingDoseSync(reason: 'email login');
     return response;
   }
 
@@ -248,17 +213,11 @@ class AuthService {
   // ══════════════════════════════════════════════════════════════
 
   Future<bool> signInWithGoogle() async {
-    /*
-     * OAuth completes after the application returns through its deep link.
-     * Install the auth listener before opening the browser so the resulting
-     * signed-in event triggers pending-dose synchronization.
-     */
     _ensurePendingDoseSyncListener();
 
     return supabase.auth.signInWithOAuth(
       OAuthProvider.google,
-      redirectTo:
-      'io.supabase.medreminder://login-callback/',
+      redirectTo: 'io.supabase.medreminder://login-callback/',
     );
   }
 
@@ -268,43 +227,25 @@ class AuthService {
 
   Future<void> signOut() async {
     await supabase.auth.signOut();
-
-    debugPrint(
-      '✅ User signed out',
-    );
+    debugPrint('✅ User signed out');
   }
 
   // ══════════════════════════════════════════════════════════════
   // PASSWORD RESET
   // ══════════════════════════════════════════════════════════════
 
-  Future<void> resetPassword(
-      String email,
-      ) async {
+  Future<void> resetPassword(String email) async {
     final safeEmail = email.trim();
-
     if (safeEmail.isEmpty) {
-      throw const AuthException(
-        'An email address is required.',
-      );
+      throw const AuthException('An email address is required.');
     }
-
-    await supabase.auth.resetPasswordForEmail(
-      safeEmail,
-    );
+    await supabase.auth.resetPasswordForEmail(safeEmail);
   }
 
-  // ── ADD THIS BELOW ──────────────────────────────────────────
-
-  Future<void> sendPasswordResetEmail({
-    required String email,
-  }) async {
+  Future<void> sendPasswordResetEmail({required String email}) async {
     final safeEmail = email.trim();
-
     if (safeEmail.isEmpty) {
-      throw const AuthException(
-        'An email address is required.',
-      );
+      throw const AuthException('An email address is required.');
     }
 
     await supabase.auth.resetPasswordForEmail(
@@ -323,18 +264,9 @@ class AuthService {
     _ensurePendingDoseSyncListener();
 
     final user = currentUser;
+    if (user == null) return null;
 
-    if (user == null) {
-      return null;
-    }
-
-    /*
-     * This covers application startup with an already-restored session,
-     * even if no new signed-in event is emitted.
-     */
-    _schedulePendingDoseSync(
-      reason: 'profile/session restoration',
-    );
+    _schedulePendingDoseSync(reason: 'profile/session restoration');
 
     final data = await supabase
         .from('profiles')
@@ -342,10 +274,7 @@ class AuthService {
         .eq('id', user.id)
         .maybeSingle();
 
-    if (data == null) {
-      return null;
-    }
-
+    if (data == null) return null;
     return Profile.fromJson(data);
   }
 
@@ -359,43 +288,24 @@ class AuthService {
     String? timezone,
   }) async {
     final user = currentUser;
-
     if (user == null) {
-      throw const AuthException(
-        'Not logged in',
-      );
+      throw const AuthException('Not logged in');
     }
 
     final safeRole = role.trim();
-
     if (safeRole.isEmpty) {
-      throw const AuthException(
-        'A user role is required.',
-      );
+      throw const AuthException('A user role is required.');
     }
 
-    final updated = await supabase
-        .from('profiles')
-        .update(
-      <String, dynamic>{
-        'role': safeRole,
-        'phone_number':
-        _cleanOptionalString(phoneNumber),
-        'timezone':
-        _cleanOptionalString(timezone) ?? 'UTC',
-        'onboarding_completed': true,
-        'updated_at':
-        DateTime.now().toIso8601String(),
-      },
-    )
-        .eq('id', user.id)
-        .select()
-        .single();
+    final updated = await supabase.from('profiles').update(<String, dynamic>{
+      'role': safeRole,
+      'phone_number': _cleanOptionalString(phoneNumber),
+      'timezone': _cleanOptionalString(timezone) ?? 'UTC',
+      'onboarding_completed': true,
+      'updated_at': DateTime.now().toIso8601String(),
+    }).eq('id', user.id).select().single();
 
-    _schedulePendingDoseSync(
-      reason: 'onboarding completed',
-    );
-
+    _schedulePendingDoseSync(reason: 'onboarding completed');
     return Profile.fromJson(updated);
   }
 
@@ -403,23 +313,15 @@ class AuthService {
   // CLEANUP
   // ══════════════════════════════════════════════════════════════
 
-  /// Normally the singleton remains active for the life of the app.
-  /// This method is provided for tests or explicit application cleanup.
   Future<void> dispose() async {
     await _authSubscription?.cancel();
     _authSubscription = null;
     _authSyncListenerStarted = false;
   }
 
-  String? _cleanOptionalString(
-      String? value,
-      ) {
+  String? _cleanOptionalString(String? value) {
     final cleaned = value?.trim();
-
-    if (cleaned == null || cleaned.isEmpty) {
-      return null;
-    }
-
+    if (cleaned == null || cleaned.isEmpty) return null;
     return cleaned;
   }
 }

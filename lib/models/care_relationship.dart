@@ -149,6 +149,17 @@ class CareRelationship {
   String get profilePhone => otherPartyPhone ?? '';
   String? get profileAvatarUrl => otherPartyAvatarUrl;
 
+  // ── Caretaker-view specific aliases (used by caretaker_profile_tab.dart) ──
+
+  /// The patient's full name. Falls back to 'Patient' if not available.
+  String get patientName => otherPartyFullName ?? 'Patient';
+
+  /// The patient's phone number.
+  String? get patientPhone => otherPartyPhone;
+
+  /// The patient's avatar URL.
+  String? get patientAvatarUrl => otherPartyAvatarUrl;
+
   /// Human label for the joined profile's account role, for anywhere the
   /// UI wants to confirm "this person signed up as a Caretaker" etc.
   String get otherPartyRoleLabel {

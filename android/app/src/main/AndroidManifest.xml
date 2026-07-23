@@ -145,7 +145,7 @@
         <service
             android:name=".TtsSpeakService"
             android:exported="false"
-            android:foregroundServiceType="mediaPlayback|camera" />
+            android:foregroundServiceType="mediaPlayback" />
 
         <!--
             Native Supabase Realtime monitoring for caretaker SOS alerts.

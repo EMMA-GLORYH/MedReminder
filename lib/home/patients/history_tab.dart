@@ -1,7 +1,6 @@
 // lib/screens/home/patient/history_tab.dart
 
 import 'package:flutter/material.dart';
-import 'package:mar/services/auth_service.dart';
 import 'package:mar/services/dose_log_service.dart';
 import 'package:mar/theme/app_colors.dart';
 import 'package:mar/theme/app_text_styles.dart';
@@ -55,14 +54,13 @@ class _HistoryTabState extends State<HistoryTab> {
         });
       }
     } catch (e, stack) {
-      debugPrint(' History load error: $e');
+      debugPrint('❌ History load error: $e');
       debugPrint('$stack');
 
       if (mounted) {
         setState(() {
           final errorMsg = e.toString();
 
-          // ✅ IMPROVED ERROR HANDLING
           if (errorMsg.contains('not permitted') || errorMsg.contains('Permission denied')) {
             _error = 'You do not have permission to view this history. Ensure the caretaker relationship is active and has "View Logs" enabled.';
           } else if (errorMsg.contains('row-level security') || errorMsg.contains('RLS')) {
@@ -119,10 +117,11 @@ class _HistoryTabState extends State<HistoryTab> {
       appBar: AppBar(
         title: Text(title),
         elevation: 0,
-        backgroundColor: Colors.transparent,
+        backgroundColor: AppColors.primaryDark,
         foregroundColor: AppColors.textPrimary,
+        iconTheme: const IconThemeData(color: AppColors.textPrimary),
       ),
-      body: SafeArea(child: _buildBody()),
+      body: _buildBody(),
     );
   }
 

@@ -34,21 +34,32 @@ class MedicationReminderScannerScreen extends StatefulWidget {
 
 class _MedicationReminderScannerScreenState
     extends State<MedicationReminderScannerScreen>
-    with SingleTickerProviderStateMixin {
+    with SingleTickerProviderStateMixin, WidgetsBindingObserver {
   bool _isMarkingTaken = false;
   bool _ttsStarted = false;
-
   bool _imageLoadStarted = false;
   bool _imageLoadFailed = false;
+  bool _isScreenReady = false;
 
-  ImageProvider? _imageProvider; // FileImage when cached, or NetworkImage if needed
+  ImageProvider? _imageProvider;
 
   late final AnimationController _pulseController;
   late final Animation<double> _pulseAnimation;
 
+  Timer? _ttsRetryTimer;
+  int _ttsRetryCount = 0;
+  static const int _maxTtsRetries = 5;
+
   @override
   void initState() {
     super.initState();
+    debugPrint('🚀 MedicationReminderScannerScreen - INIT');
+    debugPrint('📋 Dose: ${widget.dose.medicationName}');
+    debugPrint('📋 Scheduled Time: ${widget.dose.scheduledTime}');
+    debugPrint('📋 Patient ID: ${widget.dose.patientId}');
+
+    // Register as lifecycle observer
+    WidgetsBinding.instance.addObserver(this);
 
     _pulseController = AnimationController(
       vsync: this,
@@ -64,73 +75,182 @@ class _MedicationReminderScannerScreenState
         curve: Curves.easeInOut,
       ),
     );
+
+    // Force screen to be ready after first frame
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      setState(() {
+        _isScreenReady = true;
+      });
+      _startTts();
+    });
   }
 
   @override
   void didChangeDependencies() {
     super.didChangeDependencies();
-
-    if (!_ttsStarted) {
-      _ttsStarted = true;
-      _startTts();
-    }
+    debugPrint('🔄 didChangeDependencies called');
 
     if (!_imageLoadStarted) {
       _imageLoadStarted = true;
+      debugPrint('  ➡️ Loading pill image...');
       _loadPillImageOfflineFirst();
+    }
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    super.didChangeAppLifecycleState(state);
+    debugPrint('🔄 App lifecycle state: $state');
+
+    if (state == AppLifecycleState.resumed) {
+      debugPrint('  ➡️ App resumed, restarting TTS if needed');
+      _startTts();
+    }
+  }
+
+  // ══════════════════════════════════════════════════════════════
+  // FORCE START TTS WITH RETRY
+  // ══════════════════════════════════════════════════════════════
+
+  Future<void> _startTts() async {
+    if (!_isScreenReady) {
+      debugPrint('⏭️ Screen not ready yet, waiting...');
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        _startTts();
+      });
+      return;
+    }
+
+    if (_ttsStarted) {
+      debugPrint('⏭️ TTS already started, skipping');
+      return;
+    }
+
+    if (_ttsRetryCount >= _maxTtsRetries) {
+      debugPrint('❌ Max TTS retries reached (${_maxTtsRetries}), giving up');
+      return;
+    }
+
+    _ttsRetryCount++;
+    debugPrint('🎤 Force starting TTS for ${widget.dose.medicationName} (attempt $_ttsRetryCount/$_maxTtsRetries)');
+
+    try {
+      final loc = AppLocalizations.of(context);
+      String message;
+
+      try {
+        message = loc.t(
+          'ttsReminderMessage',
+          <String, String>{
+            'name': widget.dose.medicationName,
+            'dosage': widget.dose.dosageDisplay,
+          },
+        );
+      } catch (e) {
+        // Fallback if localization fails
+        message = 'Time to take ${widget.dose.medicationName}. '
+            'Dosage: ${widget.dose.dosageDisplay}. '
+            'Please confirm your medicine now.';
+      }
+
+      debugPrint('  📢 Message: $message');
+
+      // First, stop any existing TTS from native
+      await MedicationTtsService.instance.stop();
+      debugPrint('  ✅ Previous TTS stopped');
+
+      // Small delay to ensure clean state
+      await Future.delayed(const Duration(milliseconds: 300));
+
+      // Start Flutter-side TTS
+      await MedicationTtsService.instance.speakUntilStopped(
+        message: message,
+      );
+
+      _ttsStarted = true;
+      _ttsRetryCount = 0;
+      debugPrint('  ✅ TTS started successfully!');
+
+    } catch (e) {
+      debugPrint('❌ TTS start failed: $e');
+      _ttsStarted = false;
+
+      // Retry after delay
+      if (_ttsRetryCount < _maxTtsRetries) {
+        final delay = Duration(seconds: _ttsRetryCount * 2);
+        debugPrint('  🔄 Retrying TTS in ${delay.inSeconds} seconds');
+
+        _ttsRetryTimer?.cancel();
+        _ttsRetryTimer = Timer(delay, () {
+          if (mounted) {
+            _startTts();
+          }
+        });
+      }
     }
   }
 
   // ══════════════════════════════════════════════════════════════
   // OFFLINE-CAPABLE IMAGE LOADING
   // ══════════════════════════════════════════════════════════════
+
   Future<void> _loadPillImageOfflineFirst() async {
     final url = widget.dose.pillImageUrl?.trim();
+    debugPrint('📸 Loading pill image from URL: $url');
+
     if (url == null || url.isEmpty) {
-      setState(() => _imageLoadFailed = true);
+      debugPrint('❌ No image URL available');
+      if (mounted) setState(() => _imageLoadFailed = true);
       return;
     }
 
     final uri = Uri.tryParse(url);
     if (uri == null || !uri.hasScheme) {
-      setState(() => _imageLoadFailed = true);
+      debugPrint('❌ Invalid image URL: $url');
+      if (mounted) setState(() => _imageLoadFailed = true);
       return;
     }
 
-    // Only cache http(s) URLs.
     if (uri.scheme != 'http' && uri.scheme != 'https') {
-      setState(() => _imageLoadFailed = true);
+      debugPrint('❌ Unsupported URL scheme: ${uri.scheme}');
+      if (mounted) setState(() => _imageLoadFailed = true);
       return;
     }
 
     try {
       final file = await _getCachedImageFile(url);
+      debugPrint('  - Cache file path: ${file.path}');
 
       if (await file.exists()) {
+        debugPrint('  ✅ Image found in cache');
+        if (mounted) {
+          setState(() {
+            _imageProvider = FileImage(file);
+            _imageLoadFailed = false;
+          });
+        }
+        return;
+      }
+
+      debugPrint('  ⬇️ Image not in cache, downloading...');
+      final bytes = await _downloadBytes(uri).timeout(
+        const Duration(seconds: 10),
+      );
+      debugPrint('  ✅ Image downloaded successfully (${bytes.length} bytes)');
+
+      await file.create(recursive: true);
+      await file.writeAsBytes(bytes, flush: true);
+      debugPrint('  ✅ Image saved to cache');
+
+      if (mounted) {
         setState(() {
           _imageProvider = FileImage(file);
           _imageLoadFailed = false;
         });
-        return;
       }
-
-      // No cache: try downloading (may fail if no internet).
-      final bytes = await _downloadBytes(uri).timeout(
-        const Duration(seconds: 10),
-      );
-
-      // Write to disk (best-effort).
-      await file.create(recursive: true);
-      await file.writeAsBytes(bytes, flush: true);
-
-      setState(() {
-        _imageProvider = FileImage(file);
-        _imageLoadFailed = false;
-      });
-    } catch (_) {
-      // If download fails but cache exists, we'd have returned earlier.
-      // So here we consider the image missing.
-      setState(() {
+    } catch (e) {
+      debugPrint('❌ Image loading failed: $e');
+      if (mounted) setState(() {
         _imageLoadFailed = true;
         _imageProvider = null;
       });
@@ -144,7 +264,6 @@ class _MedicationReminderScannerScreenState
       await dir.create(recursive: true);
     }
 
-    // Stable file name based on URL hash
     final ext = _inferFileExtension(url) ?? '.img';
     final name = url.hashCode.toString();
 
@@ -160,7 +279,7 @@ class _MedicationReminderScannerScreenState
       final dot = last.lastIndexOf('.');
       if (dot < 0 || dot == last.length - 1) return null;
 
-      return last.substring(dot); // includes ".jpg"
+      return last.substring(dot);
     } catch (_) {
       return null;
     }
@@ -186,32 +305,15 @@ class _MedicationReminderScannerScreenState
   }
 
   // ══════════════════════════════════════════════════════════════
-  // TEXT TO SPEECH
-  // ══════════════════════════════════════════════════════════════
-  Future<void> _startTts() async {
-    final loc = AppLocalizations.of(context);
-
-    await MedicationTtsService.instance.speakUntilStopped(
-      message: loc.t(
-        'ttsReminderMessage',
-        <String, String>{
-          'name': widget.dose.medicationName,
-          'dosage': widget.dose.dosageDisplay,
-        },
-      ),
-    );
-  }
-
-  // ══════════════════════════════════════════════════════════════
   // RETRY SCHEDULING
   // ══════════════════════════════════════════════════════════════
+
   Future<void> _scheduleRetryAfterStop() async {
     final patientId = widget.dose.patientId?.trim();
+    debugPrint('⏰ Scheduling retry for patient: $patientId');
 
     if (patientId == null || patientId.isEmpty) {
-      debugPrint(
-        '⚠️ Medication retry not scheduled: patientId is missing',
-      );
+      debugPrint('⚠️ Medication retry not scheduled: patientId is missing');
       return;
     }
 
@@ -225,10 +327,9 @@ class _MedicationReminderScannerScreenState
         scheduledFor: widget.dose.scheduledTime,
         pillImageUrl: widget.dose.pillImageUrl,
       );
+      debugPrint('✅ Retry scheduled successfully');
     } catch (error, stack) {
-      debugPrint(
-        '⚠️ Could not schedule medication retry: $error',
-      );
+      debugPrint('⚠️ Could not schedule medication retry: $error');
       debugPrint('$stack');
     }
   }
@@ -236,8 +337,15 @@ class _MedicationReminderScannerScreenState
   // ══════════════════════════════════════════════════════════════
   // STOP REMINDER
   // ══════════════════════════════════════════════════════════════
+
   Future<void> _stopReminder() async {
+    debugPrint('🛑 Stopping reminder for ${widget.dose.medicationName}');
+
+    // Stop TTS
     await MedicationTtsService.instance.stop();
+    _ttsStarted = false;
+    _ttsRetryTimer?.cancel();
+    debugPrint('  ✅ TTS stopped');
 
     await _scheduleRetryAfterStop();
 
@@ -249,8 +357,10 @@ class _MedicationReminderScannerScreenState
   // ══════════════════════════════════════════════════════════════
   // BACK-PRESS GUARD
   // ══════════════════════════════════════════════════════════════
+
   Future<bool> _onWillPop() async {
     final loc = AppLocalizations.of(context);
+    debugPrint('🔙 Back pressed, showing confirmation dialog');
 
     final leave = await showDialog<bool>(
       context: context,
@@ -316,10 +426,12 @@ class _MedicationReminderScannerScreenState
   // ══════════════════════════════════════════════════════════════
   // MARK AS TAKEN
   // ══════════════════════════════════════════════════════════════
+
   Future<void> _markAsTaken() async {
     if (_isMarkingTaken) return;
 
     final loc = AppLocalizations.of(context);
+    debugPrint('✅ Marking as taken: ${widget.dose.medicationName}');
 
     setState(() {
       _isMarkingTaken = true;
@@ -333,7 +445,10 @@ class _MedicationReminderScannerScreenState
         patientId: widget.dose.patientId,
       );
 
+      // Stop everything
       await MedicationTtsService.instance.stop();
+      _ttsStarted = false;
+      _ttsRetryTimer?.cancel();
 
       if (!mounted) return;
 
@@ -354,12 +469,28 @@ class _MedicationReminderScannerScreenState
 
   @override
   void dispose() {
+    debugPrint('🧹 MedicationReminderScannerScreen - DISPOSE');
+    debugPrint('  - TTS Started: $_ttsStarted');
+
+    // Unregister lifecycle observer
+    WidgetsBinding.instance.removeObserver(this);
+
+    // Stop everything
+    if (_ttsStarted) {
+      MedicationTtsService.instance.stop();
+      _ttsStarted = false;
+      debugPrint('  ✅ TTS stopped on dispose');
+    }
+
+    _ttsRetryTimer?.cancel();
     _pulseController.dispose();
     super.dispose();
   }
 
   @override
   Widget build(BuildContext context) {
+    debugPrint('🏗️ Building MedicationReminderScannerScreen');
+
     final dose = widget.dose;
     final imageUrl = dose.pillImageUrl?.trim();
 
@@ -399,7 +530,11 @@ class _MedicationReminderScannerScreenState
                             await _stopReminder();
                           }
                         },
-                        onMute: () => MedicationTtsService.instance.stop(),
+                        onMute: () {
+                          debugPrint('🔇 Mute button pressed');
+                          MedicationTtsService.instance.stop();
+                          _ttsStarted = false;
+                        },
                       ),
                       _MedicineInfoCard(dose: dose, pulseValue: pulseValue),
                       const SizedBox(height: 20),
@@ -493,8 +628,7 @@ class _MedicationReminderScannerScreenState
             ),
             const SizedBox(height: 14),
             Text(
-              AppLocalizations.of(context).t('loadingMedicineImage') ??
-                  'Loading medicine image…',
+              'Loading medicine image…',
               style: const TextStyle(
                 color: Colors.white70,
                 fontSize: 14,
@@ -525,8 +659,6 @@ class _ScannerHeader extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final loc = AppLocalizations.of(context);
-
     return Container(
       color: const Color(0xFF0A0F14),
       padding: const EdgeInsets.fromLTRB(8, 12, 8, 12),
@@ -539,11 +671,11 @@ class _ScannerHeader extends StatelessWidget {
               size: 26,
             ),
             onPressed: onClose,
-            tooltip: loc.t('stopReminder'),
+            tooltip: 'Stop Reminder',
           ),
           Expanded(
             child: Text(
-              loc.t('medicationReminder'),
+              'Medication Reminder',
               style: const TextStyle(
                 color: Colors.white,
                 fontSize: 18,
@@ -560,7 +692,7 @@ class _ScannerHeader extends StatelessWidget {
               size: 24,
             ),
             onPressed: onMute,
-            tooltip: loc.t('stopReminder'),
+            tooltip: 'Mute',
           ),
         ],
       ),
@@ -579,8 +711,6 @@ class _MedicineInfoCard extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final loc = AppLocalizations.of(context);
-
     return Container(
       margin: const EdgeInsets.symmetric(horizontal: 20),
       padding: const EdgeInsets.symmetric(
@@ -664,7 +794,7 @@ class _MedicineInfoCard extends StatelessWidget {
               ),
               const SizedBox(height: 2),
               Text(
-                dose.isPast ? loc.t('overdue') : loc.t('dueSoon'),
+                dose.isPast ? 'Overdue' : 'Due Soon',
                 style: TextStyle(
                   color: dose.isPast
                       ? Colors.redAccent
@@ -693,8 +823,6 @@ class _NoImagePlaceholder extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final loc = AppLocalizations.of(context);
-
     return Center(
       child: Padding(
         padding: const EdgeInsets.all(28),
@@ -708,7 +836,7 @@ class _NoImagePlaceholder extends StatelessWidget {
             ),
             const SizedBox(height: 16),
             Text(
-              loc.t('noImageAvailable'),
+              'No image available',
               style: AppTextStyles.bodyMedium.copyWith(
                 color: Colors.white54,
               ),
@@ -734,8 +862,6 @@ class _BottomPanel extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final loc = AppLocalizations.of(context);
-
     return Container(
       padding: const EdgeInsets.fromLTRB(20, 14, 20, 20),
       child: Column(
@@ -759,7 +885,7 @@ class _BottomPanel extends StatelessWidget {
                 size: 20,
               ),
               label: Text(
-                isMarkingTaken ? loc.t('saving') : loc.t('markAsTaken'),
+                isMarkingTaken ? 'Saving...' : 'Mark as Taken',
                 style: const TextStyle(
                   fontSize: 16,
                   fontWeight: FontWeight.bold,
@@ -781,7 +907,7 @@ class _BottomPanel extends StatelessWidget {
           TextButton(
             onPressed: onStopReminder,
             child: Text(
-              loc.t('stopReminder'),
+              'Stop Reminder',
               style: const TextStyle(
                 color: Colors.white54,
                 fontSize: 14,

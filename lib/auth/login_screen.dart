@@ -10,6 +10,7 @@ import '../theme/app_text_styles.dart';
 import '../widgets/snackbar/app_snackbar.dart';
 import 'forgot_password_screen.dart';
 import 'signup_screen.dart';
+import 'package:permission_handler/permission_handler.dart';
 
 class LoginScreen extends StatefulWidget {
   const LoginScreen({super.key});
@@ -45,7 +46,29 @@ class _LoginScreenState extends State<LoginScreen> {
 
       if (!mounted) return;
 
-      AppSnackbar.success(context, 'Signed in! Loading your dashboard...');
+      // Request once for future medication-alert flashlight support.
+      // Android remembers the user's choice after this.
+      final cameraStatus = await Permission.camera.status;
+
+      if (!cameraStatus.isGranted) {
+        final result = await Permission.camera.request();
+
+        if (!result.isGranted && mounted) {
+          AppSnackbar.info(
+            context,
+            'Camera permission was not granted. '
+                'Flashlight medication alerts can be enabled later in Settings.',
+          );
+        }
+      }
+
+      if (!mounted) return;
+
+      AppSnackbar.success(
+        context,
+        'Signed in! Loading your dashboard...',
+      );
+
       await AuthRouter.routeAfterAuth(context);
     } on AuthException catch (e) {
       if (mounted) {
@@ -54,7 +77,10 @@ class _LoginScreenState extends State<LoginScreen> {
       }
     } catch (e) {
       if (mounted) {
-        AppSnackbar.error(context, 'Something went wrong. Please try again.');
+        AppSnackbar.error(
+          context,
+          'Something went wrong. Please try again.',
+        );
         setState(() => _isLoading = false);
       }
     }
@@ -69,6 +95,25 @@ class _LoginScreenState extends State<LoginScreen> {
         AppSnackbar.error(context, 'Google sign-in failed. Please try again.');
         setState(() => _isLoading = false);
       }
+    }
+  }
+
+  Future<void> _requestCameraPermissionForFlashlight() async {
+    final status = await Permission.camera.status;
+
+    // User already granted this once. No popup will appear.
+    if (status.isGranted) {
+      return;
+    }
+
+    // Ask once after login so medication alerts can use flashlight.
+    final requestedStatus = await Permission.camera.request();
+
+    if (!requestedStatus.isGranted && mounted) {
+      AppSnackbar.info(
+        context,
+        'Camera permission was not granted. Medication alerts will still use sound, TTS, and vibration.',
+      );
     }
   }
 

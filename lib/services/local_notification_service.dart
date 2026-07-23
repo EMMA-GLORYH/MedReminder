@@ -1,3 +1,5 @@
+// lib/services/local_notification_service.dart
+
 import 'dart:async';
 import 'dart:convert';
 import 'dart:typed_data';
@@ -15,6 +17,12 @@ import '../main.dart';
 import 'dose_log_service.dart';
 import 'medication_tts_service.dart';
 import 'schedule_service.dart';
+
+void localNotificationLog(String message) {
+  if (kDebugMode) {
+    debugPrint(message);
+  }
+}
 
 // This name must match SCANNER_ROUTE_CHANNEL in MainActivity.kt.
 const MethodChannel _scannerRouteChannel = MethodChannel(
@@ -66,6 +74,15 @@ class LocalNotificationService {
 
   static const String _payloadPreferencePrefix = 'cached_dose_payload_';
 
+  static const String _alarmIdsPreferenceKey = 'tracked_native_alarm_ids';
+
+  /// Tracks native alarm IDs by schedule ID.
+  ///
+  /// This helps cancellation be more direct and keeps alarm IDs available after
+  /// app restart. We still scan pending notification payloads as a fallback for
+  /// older alarms that were scheduled before this tracking existed.
+  final Map<String, Set<int>> _scheduledAlarmIds = <String, Set<int>>{};
+
   // ══════════════════════════════════════════════════════════════
   // INITIALIZATION
   // ══════════════════════════════════════════════════════════════
@@ -74,6 +91,7 @@ class LocalNotificationService {
     if (_initialized) {
       return Future<void>.value();
     }
+
     return _initializationFuture ??= _performInitialization();
   }
 
@@ -82,10 +100,11 @@ class LocalNotificationService {
     _scannerRouteChannel.setMethodCallHandler(
           (MethodCall call) async {
         if (call.method != 'openScanner') {
-          return false; // <-- fixed
+          return false;
         }
 
-        final payload = call.arguments is String ? call.arguments as String : null;
+        final payload =
+        call.arguments is String ? call.arguments as String : null;
 
         if (payload == null || payload.trim().isEmpty) {
           return false;
@@ -156,6 +175,8 @@ class LocalNotificationService {
       await androidPlugin.requestExactAlarmsPermission();
     }
 
+    await _loadPersistedAlarmIds();
+
     _initialized = true;
 
     // Retrieve cold-start payload from MainActivity.
@@ -164,13 +185,12 @@ class LocalNotificationService {
     // Also handle cold start from a tapped visual notification.
     await _processNotificationLaunchDetails();
 
-    debugPrint('✅ LocalNotificationService initialized');
+    localNotificationLog('✅ LocalNotificationService initialized');
   }
 
   Future<void> _retrieveInitialNativeScannerPayload() async {
     try {
-      final initialPayload =
-      await _scannerRouteChannel.invokeMethod<String>(
+      final initialPayload = await _scannerRouteChannel.invokeMethod<String>(
         'getInitialScannerPayload',
       );
 
@@ -178,20 +198,19 @@ class LocalNotificationService {
         return;
       }
 
-      debugPrint('📥 Received initial scanner payload from MainActivity');
+      localNotificationLog('📥 Received initial scanner payload from MainActivity');
       _queueScannerPayload(initialPayload);
     } on MissingPluginException {
-      debugPrint('⚠️ Native scanner route channel is unavailable');
+      localNotificationLog('⚠️ Native scanner route channel is unavailable');
     } on PlatformException catch (error) {
-      debugPrint(
-        '⚠️ Could not retrieve initial scanner payload: '
-            '${error.message}',
+      localNotificationLog(
+        '⚠️ Could not retrieve initial scanner payload: ${error.message}',
       );
     } catch (error, stack) {
-      debugPrint(
+      localNotificationLog(
         '⚠️ Could not retrieve initial scanner payload: $error',
       );
-      debugPrint('$stack');
+      localNotificationLog('$stack');
     }
   }
 
@@ -208,11 +227,96 @@ class LocalNotificationService {
 
       await _handleNotificationResponse(response);
     } catch (error, stack) {
-      debugPrint(
-        '⚠️ Could not process notification launch details: '
-            '$error',
+      localNotificationLog(
+        '⚠️ Could not process notification launch details: $error',
       );
-      debugPrint('$stack');
+      localNotificationLog('$stack');
+    }
+  }
+
+  // ══════════════════════════════════════════════════════════════
+  // ALARM ID TRACKING
+  // ══════════════════════════════════════════════════════════════
+
+  Future<void> _loadPersistedAlarmIds() async {
+    try {
+      final preferences = await SharedPreferences.getInstance();
+      final raw = preferences.getString(_alarmIdsPreferenceKey);
+
+      if (raw == null || raw.trim().isEmpty) return;
+
+      final decoded = jsonDecode(raw);
+      if (decoded is! Map<String, dynamic>) return;
+
+      _scheduledAlarmIds.clear();
+
+      for (final entry in decoded.entries) {
+        final scheduleId = entry.key;
+        final rawIds = entry.value;
+
+        if (rawIds is! List) continue;
+
+        _scheduledAlarmIds[scheduleId] = rawIds
+            .whereType<num>()
+            .map((value) => value.toInt())
+            .where((value) => value > 0)
+            .toSet();
+      }
+
+      localNotificationLog(
+        '📦 Loaded tracked native alarm IDs for '
+            '${_scheduledAlarmIds.length} schedule(s)',
+      );
+    } catch (error) {
+      localNotificationLog('⚠️ Could not load tracked native alarm IDs: $error');
+    }
+  }
+
+  Future<void> _persistAlarmIds() async {
+    try {
+      final preferences = await SharedPreferences.getInstance();
+
+      final encoded = _scheduledAlarmIds.map(
+            (scheduleId, ids) => MapEntry(
+          scheduleId,
+          ids.toList(),
+        ),
+      );
+
+      await preferences.setString(
+        _alarmIdsPreferenceKey,
+        jsonEncode(encoded),
+      );
+    } catch (error) {
+      localNotificationLog(
+        '⚠️ Could not persist tracked native alarm IDs: $error',
+      );
+    }
+  }
+
+  void _trackAlarmId({
+    required String scheduleId,
+    required int alarmId,
+  }) {
+    if (scheduleId.trim().isEmpty || alarmId <= 0) return;
+
+    _scheduledAlarmIds.putIfAbsent(scheduleId, () => <int>{});
+    _scheduledAlarmIds[scheduleId]!.add(alarmId);
+  }
+
+  void _untrackAlarmIds({
+    required String scheduleId,
+    required Iterable<int> alarmIds,
+  }) {
+    final tracked = _scheduledAlarmIds[scheduleId];
+    if (tracked == null) return;
+
+    for (final alarmId in alarmIds) {
+      tracked.remove(alarmId);
+    }
+
+    if (tracked.isEmpty) {
+      _scheduledAlarmIds.remove(scheduleId);
     }
   }
 
@@ -235,14 +339,14 @@ class LocalNotificationService {
       final alertType = decoded['alertType']?.toString() ?? 'medication_due';
 
       if (alertType == 'prior_reminder') {
-        debugPrint('ℹ️ Scanner route ignored for prior reminder');
+        localNotificationLog('ℹ️ Scanner route ignored for prior reminder');
         return;
       }
 
       final scannerKey = _scannerKey(decoded);
 
       if (_queuedScannerKeys.contains(scannerKey)) {
-        debugPrint(
+        localNotificationLog(
           'ℹ️ Duplicate scanner request ignored: $scannerKey',
         );
         return;
@@ -251,13 +355,13 @@ class LocalNotificationService {
       _queuedScannerKeys.add(scannerKey);
       _pendingScannerPayloads.add(payload);
 
-      debugPrint(
+      localNotificationLog(
         '📥 Medication scanner request queued: $scannerKey',
       );
 
       unawaited(_drainScannerQueue());
     } catch (error) {
-      debugPrint('❌ Invalid scanner payload: $error');
+      localNotificationLog('❌ Invalid scanner payload: $error');
     }
   }
 
@@ -265,10 +369,9 @@ class LocalNotificationService {
     final patientId = data['patientId']?.toString() ?? '';
     final scheduleId = data['scheduleId']?.toString() ?? '';
     final medicationId = data['medicationId']?.toString() ?? '';
-    final scheduledFor =
-        data['scheduledFor']?.toString() ??
-            data['scheduledForMillis']?.toString() ??
-            '';
+    final scheduledFor = data['scheduledFor']?.toString() ??
+        data['scheduledForMillis']?.toString() ??
+        '';
 
     return '$patientId|$scheduleId|$medicationId|$scheduledFor';
   }
@@ -302,7 +405,7 @@ class LocalNotificationService {
             navigator: navigator,
           );
         } catch (error) {
-          debugPrint(
+          localNotificationLog(
             '❌ Could not process queued scanner route: $error',
           );
         } finally {
@@ -341,9 +444,9 @@ class LocalNotificationService {
 
     final now = DateTime.now();
     if (!scheduledFor.isAfter(now)) {
-      debugPrint(
-        'ℹ️ Skipping dose notification because '
-            'the time has already passed: $scheduledFor',
+      localNotificationLog(
+        'ℹ️ Skipping dose notification because the time has already passed: '
+            '$scheduledFor',
       );
       return;
     }
@@ -423,6 +526,11 @@ class LocalNotificationService {
         dosageDisplay: dosageDisplay,
         minutesBefore: 10,
       );
+
+      _trackAlarmId(
+        scheduleId: scheduleId,
+        alarmId: priorNativeAlarmId,
+      );
     }
 
     // 2) Due exact
@@ -444,8 +552,15 @@ class LocalNotificationService {
       payload: duePayload,
     );
 
+    _trackAlarmId(
+      scheduleId: scheduleId,
+      alarmId: dueNativeAlarmId,
+    );
+
+    await _persistAlarmIds();
+
     if (escalationStep1Mins < 0 || escalationStep2Mins < 0) {
-      debugPrint('⚠️ Invalid escalation values were supplied');
+      localNotificationLog('⚠️ Invalid escalation values were supplied');
     }
   }
 
@@ -462,10 +577,14 @@ class LocalNotificationService {
     required DateTime scheduledFor,
     String? pillImageUrl,
   }) async {
+    if (!_initialized) {
+      await init();
+    }
+
     final safePatientId = patientId.trim();
 
     if (safePatientId.isEmpty) {
-      debugPrint(
+      localNotificationLog(
         '⚠️ Cannot schedule medication retry: patientId is empty',
       );
       return;
@@ -506,7 +625,14 @@ class LocalNotificationService {
       payload: retryPayload,
     );
 
-    debugPrint(
+    _trackAlarmId(
+      scheduleId: scheduleId,
+      alarmId: retryAlarmId,
+    );
+
+    await _persistAlarmIds();
+
+    localNotificationLog(
       '🔁 Medication retry scheduled for $retryTime '
           '(alarmId=$retryAlarmId)',
     );
@@ -630,8 +756,11 @@ class LocalNotificationService {
     try {
       final preferences = await SharedPreferences.getInstance();
       final prefix = '$_payloadPreferencePrefix${scheduleId}_';
-      final keys =
-      preferences.getKeys().where((k) => k.startsWith(prefix)).toList();
+      final keys = preferences
+          .getKeys()
+          .where((key) => key.startsWith(prefix))
+          .toList();
+
       for (final key in keys) {
         await preferences.remove(key);
       }
@@ -641,9 +770,11 @@ class LocalNotificationService {
   Future<void> _removeAllCachedPayloads() async {
     try {
       final preferences = await SharedPreferences.getInstance();
-      final keys = preferences.getKeys().where(
-            (k) => k.startsWith(_payloadPreferencePrefix),
-      );
+      final keys = preferences
+          .getKeys()
+          .where((key) => key.startsWith(_payloadPreferencePrefix))
+          .toList();
+
       for (final key in keys) {
         await preferences.remove(key);
       }
@@ -658,6 +789,10 @@ class LocalNotificationService {
     required String scheduleId,
     required DateTime scheduledFor,
   }) async {
+    if (!_initialized) {
+      await init();
+    }
+
     final notificationIds = <int>[
       _generateId(
         scheduleId,
@@ -705,11 +840,17 @@ class LocalNotificationService {
       _retryNativeAlarmStep,
     );
 
-    await MedicationTtsService.instance.cancelPriorReminder(priorNativeAlarmId);
+    await MedicationTtsService.instance.cancelPriorReminder(
+      priorNativeAlarmId,
+    );
 
-    await MedicationTtsService.instance.cancelAutoOpen(dueNativeAlarmId);
+    await MedicationTtsService.instance.cancelAutoOpen(
+      dueNativeAlarmId,
+    );
 
-    await MedicationTtsService.instance.cancelAutoOpen(retryNativeAlarmId);
+    await MedicationTtsService.instance.cancelAutoOpen(
+      retryNativeAlarmId,
+    );
 
     /*
      * Stops TTS, alarm.mp3, vibration, flashlight and foreground service.
@@ -721,16 +862,32 @@ class LocalNotificationService {
       scheduledFor: scheduledFor,
     );
 
-    debugPrint(
+    _untrackAlarmIds(
+      scheduleId: scheduleId,
+      alarmIds: <int>[
+        priorNativeAlarmId,
+        dueNativeAlarmId,
+        retryNativeAlarmId,
+      ],
+    );
+
+    await _persistAlarmIds();
+
+    localNotificationLog(
       '🗑️ Cancelled all alerts, including retry, for '
           '$scheduleId at $scheduledFor',
     );
   }
 
   Future<void> cancelSchedule(String scheduleId) async {
-    final pending = await _plugin.pendingNotificationRequests();
+    if (!_initialized) {
+      await init();
+    }
 
     final nativeAlarmIds = <int>{};
+    nativeAlarmIds.addAll(_scheduledAlarmIds[scheduleId] ?? <int>{});
+
+    final pending = await _plugin.pendingNotificationRequests();
 
     for (final notification in pending) {
       final rawPayload = notification.payload;
@@ -766,12 +923,28 @@ class LocalNotificationService {
     }
 
     await _removeSchedulePayloads(scheduleId);
+
+    _scheduledAlarmIds.remove(scheduleId);
+    await _persistAlarmIds();
+
+    localNotificationLog(
+      '🗑️ Cancelled schedule $scheduleId '
+          '(${nativeAlarmIds.length} native alarm(s))',
+    );
   }
 
   Future<void> cancelAll() async {
+    if (!_initialized) {
+      await init();
+    }
+
     final pending = await _plugin.pendingNotificationRequests();
 
     final nativeAlarmIds = <int>{};
+
+    for (final ids in _scheduledAlarmIds.values) {
+      nativeAlarmIds.addAll(ids);
+    }
 
     for (final notification in pending) {
       final rawPayload = notification.payload;
@@ -809,6 +982,11 @@ class LocalNotificationService {
 
     _pendingScannerPayloads.clear();
     _queuedScannerKeys.clear();
+    _scheduledAlarmIds.clear();
+
+    await _persistAlarmIds();
+
+    localNotificationLog('🗑️ Cancelled all notifications and native alarms');
   }
 
   DateTime _scheduledTimeFromPayload(Map<String, dynamic> data) {
@@ -816,10 +994,12 @@ class LocalNotificationService {
     if (rawMillis is num) {
       return DateTime.fromMillisecondsSinceEpoch(rawMillis.toInt());
     }
+
     final rawScheduledFor = data['scheduledFor']?.toString();
     if (rawScheduledFor == null || rawScheduledFor.trim().isEmpty) {
       throw const FormatException('Missing scheduled medication time');
     }
+
     return DateTime.parse(rawScheduledFor);
   }
 
@@ -890,17 +1070,14 @@ Future<void> _openScannerFromPayload({
         : (rawDosage.isNotEmpty ? rawDosage : 'dose');
 
     final rawImageUrl = decoded['pillImageUrl']?.toString().trim();
-    final medicationName = decoded['medicationName']
-        ?.toString()
-        .trim()
-        .takeIfNotEmpty ??
-        'Medication';
 
-    final genericName = decoded['genericName']
-        ?.toString()
-        .trim()
-        .takeIfNotEmpty ??
-        medicationName;
+    final medicationName =
+        decoded['medicationName']?.toString().trim().takeIfNotEmpty ??
+            'Medication';
+
+    final genericName =
+        decoded['genericName']?.toString().trim().takeIfNotEmpty ??
+            medicationName;
 
     final dose = TodayDose(
       patientId: patientId,
@@ -922,8 +1099,10 @@ Future<void> _openScannerFromPayload({
       ),
     );
   } catch (error, stack) {
-    debugPrint('❌ Failed to open reminder screen from payload: $error');
-    debugPrint('$stack');
+    localNotificationLog(
+      '❌ Failed to open reminder screen from payload: $error',
+    );
+    localNotificationLog('$stack');
   }
 }
 
@@ -985,11 +1164,11 @@ Future<void> _handleNotificationResponse(
       return;
     }
 
-    // OPEN_SCANNER action / body tap: queue + native handler will open
+    // OPEN_SCANNER action / body tap: queue + native handler will open.
     LocalNotificationService.instance._queueScannerPayload(rawPayload);
   } catch (error, stack) {
-    debugPrint('❌ Notification response failed: $error');
-    debugPrint('$stack');
+    localNotificationLog('❌ Notification response failed: $error');
+    localNotificationLog('$stack');
   }
 }
 

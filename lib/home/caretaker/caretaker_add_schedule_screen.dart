@@ -1,6 +1,6 @@
-// lib/screens/home/caretaker/caretaker_add_schedule_screen.dart
-
+import 'package:flutter/cupertino.dart';
 import 'package:flutter/material.dart';
+import 'package:supabase_flutter/supabase_flutter.dart';
 
 import '../../../models/medication_schedule.dart';
 import '../../../services/care_relationship_service.dart';
@@ -40,11 +40,14 @@ class CaretakerAddScheduleScreen extends StatefulWidget {
 
 class _CaretakerAddScheduleScreenState
     extends State<CaretakerAddScheduleScreen> {
+  String _resolvedPatientId = '';
+
   String _frequencyType = 'daily';
   List<TimeOfDay> _times = [const TimeOfDay(hour: 8, minute: 0)];
   double _intervalHours = 8;
   List<int> _selectedDays = [0, 1, 2, 3, 4, 5, 6];
   bool _escalationEnabled = true;
+
   bool _isSaving = false;
   bool _isLoading = true;
   bool _scheduleSaved = false;
@@ -61,55 +64,150 @@ class _CaretakerAddScheduleScreenState
   static const Duration _saveCooldown = Duration(seconds: 3);
 
   static const List<_TimePreset> _timePresets = [
-    _TimePreset('Morning', Icons.wb_sunny_rounded, TimeOfDay(hour: 8, minute: 0)),
-    _TimePreset('Noon', Icons.wb_sunny_outlined, TimeOfDay(hour: 12, minute: 0)),
-    _TimePreset('Afternoon', Icons.wb_twilight_rounded, TimeOfDay(hour: 15, minute: 0)),
-    _TimePreset('Evening', Icons.nights_stay_outlined, TimeOfDay(hour: 18, minute: 0)),
-    _TimePreset('Night', Icons.bedtime_rounded, TimeOfDay(hour: 21, minute: 0)),
-    _TimePreset('Bedtime', Icons.dark_mode_rounded, TimeOfDay(hour: 22, minute: 30)),
+    _TimePreset(
+      'Morning',
+      Icons.wb_sunny_rounded,
+      TimeOfDay(hour: 8, minute: 0),
+    ),
+    _TimePreset(
+      'Noon',
+      Icons.wb_sunny_outlined,
+      TimeOfDay(hour: 12, minute: 0),
+    ),
+    _TimePreset(
+      'Afternoon',
+      Icons.wb_twilight_rounded,
+      TimeOfDay(hour: 15, minute: 0),
+    ),
+    _TimePreset(
+      'Evening',
+      Icons.nights_stay_outlined,
+      TimeOfDay(hour: 18, minute: 0),
+    ),
+    _TimePreset(
+      'Night',
+      Icons.bedtime_rounded,
+      TimeOfDay(hour: 21, minute: 0),
+    ),
+    _TimePreset(
+      'Bedtime',
+      Icons.dark_mode_rounded,
+      TimeOfDay(hour: 22, minute: 30),
+    ),
   ];
 
   static const List<_SchedulePreset> _schedulePresets = [
-    _SchedulePreset('Once daily', 'Morning', [TimeOfDay(hour: 8, minute: 0)]),
-    _SchedulePreset('Twice daily', 'Morning & Evening', [TimeOfDay(hour: 8, minute: 0), TimeOfDay(hour: 20, minute: 0)]),
-    _SchedulePreset('Three times', 'Morning, Noon & Evening', [TimeOfDay(hour: 8, minute: 0), TimeOfDay(hour: 13, minute: 0), TimeOfDay(hour: 19, minute: 0)]),
-    _SchedulePreset('Four times', 'Every 6 hours', [TimeOfDay(hour: 6, minute: 0), TimeOfDay(hour: 12, minute: 0), TimeOfDay(hour: 18, minute: 0), TimeOfDay(hour: 22, minute: 0)]),
+    _SchedulePreset(
+      'Once daily',
+      'Morning',
+      [TimeOfDay(hour: 8, minute: 0)],
+    ),
+    _SchedulePreset(
+      'Twice daily',
+      'Morning & Evening',
+      [TimeOfDay(hour: 8, minute: 0), TimeOfDay(hour: 20, minute: 0)],
+    ),
+    _SchedulePreset(
+      'Three times',
+      'Morning, Noon & Evening',
+      [
+        TimeOfDay(hour: 8, minute: 0),
+        TimeOfDay(hour: 13, minute: 0),
+        TimeOfDay(hour: 19, minute: 0),
+      ],
+    ),
+    _SchedulePreset(
+      'Four times',
+      'Every 6 hours',
+      [
+        TimeOfDay(hour: 6, minute: 0),
+        TimeOfDay(hour: 12, minute: 0),
+        TimeOfDay(hour: 18, minute: 0),
+        TimeOfDay(hour: 22, minute: 0),
+      ],
+    ),
   ];
 
   @override
   void initState() {
     super.initState();
-    _checkPermission();
+    _initialize();
+  }
+
+  Future<String> _resolveTruePatientId(String id) async {
+    final safeId = id.trim();
+    if (safeId.isEmpty) return safeId;
+
+    try {
+      final profile = await Supabase.instance.client
+          .from('profiles')
+          .select('id')
+          .eq('id', safeId)
+          .maybeSingle();
+
+      if (profile != null && profile['id'] != null) {
+        return safeId;
+      }
+    } catch (_) {}
+
+    try {
+      final relationship = await Supabase.instance.client
+          .from('care_relationships')
+          .select('patient_id')
+          .eq('id', safeId)
+          .maybeSingle();
+
+      if (relationship != null && relationship['patient_id'] != null) {
+        return relationship['patient_id'].toString();
+      }
+    } catch (_) {}
+
+    return safeId;
+  }
+
+  Future<void> _initialize() async {
+    try {
+      _resolvedPatientId = await _resolveTruePatientId(widget.patientId);
+      debugPrint(
+        '🚀 CaretakerAddScheduleScreen resolved patient ID: $_resolvedPatientId',
+      );
+      await _checkPermission();
+    } catch (e) {
+      debugPrint('❌ Failed to initialize schedule screen: $e');
+      if (!mounted) return;
+      setState(() => _checkingPermission = false);
+      AppSnackbar.error(context, 'Failed to load schedule setup.');
+      Navigator.pop(context);
+    }
   }
 
   Future<void> _checkPermission() async {
     try {
       final canEdit = await CareRelationshipService.instance
-          .canEditMedications(widget.patientId);
+          .canEditMedications(_resolvedPatientId);
 
-      if (mounted) {
-        setState(() {
-          _hasPermission = canEdit;
-          _checkingPermission = false;
-        });
+      if (!mounted) return;
 
-        if (!canEdit) {
-          AppSnackbar.error(
-            context,
-            'You do not have permission to manage schedules for this patient.',
-          );
-          Navigator.pop(context);
-        } else {
-          _loadExistingSchedule();
-        }
+      setState(() {
+        _hasPermission = canEdit;
+        _checkingPermission = false;
+      });
+
+      if (!canEdit) {
+        AppSnackbar.error(
+          context,
+          'You do not have permission to manage schedules for this patient.',
+        );
+        Navigator.pop(context);
+      } else {
+        _loadExistingSchedule();
       }
     } catch (e) {
       debugPrint('Error checking permission: $e');
-      if (mounted) {
-        setState(() => _checkingPermission = false);
-        AppSnackbar.error(context, 'Failed to check permissions.');
-        Navigator.pop(context);
-      }
+      if (!mounted) return;
+      setState(() => _checkingPermission = false);
+      AppSnackbar.error(context, 'Failed to check permissions.');
+      Navigator.pop(context);
     }
   }
 
@@ -120,45 +218,44 @@ class _CaretakerAddScheduleScreenState
 
       if (cachedSchedules.isNotEmpty) {
         final existing = cachedSchedules.first;
-        if (mounted) {
-          setState(() {
-            _existingSchedule = existing;
-            _originalSchedule = existing;
-            _frequencyType = existing.frequencyType;
-            _escalationEnabled = existing.escalationEnabled;
-            if (existing.scheduledTimes != null) {
-              _times = List<TimeOfDay>.from(existing.scheduledTimes!);
-            }
-            if (existing.scheduledDays != null) {
-              _selectedDays = List<int>.from(existing.scheduledDays!);
-            }
-            _intervalHours = existing.intervalHours ?? 8.0;
-            _isLoading = false;
-          });
-        }
+        if (!mounted) return;
+        setState(() {
+          _existingSchedule = existing;
+          _originalSchedule = existing;
+          _frequencyType = existing.frequencyType;
+          _escalationEnabled = existing.escalationEnabled;
+          if (existing.scheduledTimes != null) {
+            _times = List<TimeOfDay>.from(existing.scheduledTimes!);
+          }
+          if (existing.scheduledDays != null) {
+            _selectedDays = List<int>.from(existing.scheduledDays!);
+          }
+          _intervalHours = existing.intervalHours ?? 8.0;
+          _isLoading = false;
+        });
         return;
       }
 
-      final schedules = await ScheduleService.instance
-          .getSchedulesForMedication(widget.medicationId);
+      final schedules = await ScheduleService.instance.getSchedulesForMedication(
+        widget.medicationId,
+        patientId: _resolvedPatientId,
+      );
 
-      if (schedules.isNotEmpty) {
+      if (schedules.isNotEmpty && mounted) {
         final existing = schedules.first;
-        if (mounted) {
-          setState(() {
-            _existingSchedule = existing;
-            _originalSchedule = existing;
-            _frequencyType = existing.frequencyType;
-            _escalationEnabled = existing.escalationEnabled;
-            if (existing.scheduledTimes != null) {
-              _times = List<TimeOfDay>.from(existing.scheduledTimes!);
-            }
-            if (existing.scheduledDays != null) {
-              _selectedDays = List<int>.from(existing.scheduledDays!);
-            }
-            _intervalHours = existing.intervalHours ?? 8.0;
-          });
-        }
+        setState(() {
+          _existingSchedule = existing;
+          _originalSchedule = existing;
+          _frequencyType = existing.frequencyType;
+          _escalationEnabled = existing.escalationEnabled;
+          if (existing.scheduledTimes != null) {
+            _times = List<TimeOfDay>.from(existing.scheduledTimes!);
+          }
+          if (existing.scheduledDays != null) {
+            _selectedDays = List<int>.from(existing.scheduledDays!);
+          }
+          _intervalHours = existing.intervalHours ?? 8.0;
+        });
       }
     } catch (e) {
       debugPrint('Error loading existing schedule: $e');
@@ -227,25 +324,148 @@ class _CaretakerAddScheduleScreenState
     });
   }
 
+  Future<TimeOfDay?> _showTimePickerSheet(TimeOfDay initial) async {
+    DateTime tempValue = DateTime(
+      2024,
+      1,
+      1,
+      initial.hour,
+      initial.minute,
+    );
+
+    return showModalBottomSheet<TimeOfDay>(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: Colors.transparent,
+      builder: (sheetContext) {
+        final bottomPadding = MediaQuery.of(sheetContext).viewPadding.bottom;
+
+        return SafeArea(
+          top: false,
+          child: Padding(
+            padding: EdgeInsets.fromLTRB(
+              12,
+              12,
+              12,
+              bottomPadding > 0 ? bottomPadding : 12,
+            ),
+            child: Container(
+              decoration: BoxDecoration(
+                color: AppColors.surface,
+                borderRadius: BorderRadius.circular(24),
+                boxShadow: [
+                  BoxShadow(
+                    color: Colors.black.withValues(alpha: 0.10),
+                    blurRadius: 24,
+                    offset: const Offset(0, 10),
+                  ),
+                ],
+              ),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Padding(
+                    padding: const EdgeInsets.fromLTRB(16, 14, 12, 8),
+                    child: Row(
+                      children: [
+                        Expanded(
+                          child: Text(
+                            'Select reminder time',
+                            style: AppTextStyles.titleMedium.copyWith(
+                              fontWeight: FontWeight.w700,
+                            ),
+                          ),
+                        ),
+                        IconButton(
+                          onPressed: () => Navigator.pop(sheetContext),
+                          icon: const Icon(Icons.close_rounded),
+                          tooltip: 'Close',
+                        ),
+                      ],
+                    ),
+                  ),
+                  Divider(color: AppColors.border, height: 1),
+                  SizedBox(
+                    height: 220,
+                    child: CupertinoTheme(
+                      data: CupertinoThemeData(
+                        brightness: Theme.of(sheetContext).brightness,
+                        primaryColor: AppColors.primary,
+                      ),
+                      child: CupertinoDatePicker(
+                        mode: CupertinoDatePickerMode.time,
+                        use24hFormat: false,
+                        minuteInterval: 1,
+                        initialDateTime: tempValue,
+                        onDateTimeChanged: (value) {
+                          tempValue = value;
+                        },
+                      ),
+                    ),
+                  ),
+                  Padding(
+                    padding: const EdgeInsets.fromLTRB(16, 8, 16, 16),
+                    child: Row(
+                      children: [
+                        Expanded(
+                          child: OutlinedButton(
+                            onPressed: () => Navigator.pop(sheetContext),
+                            style: OutlinedButton.styleFrom(
+                              minimumSize: const Size.fromHeight(48),
+                              side: const BorderSide(color: AppColors.border),
+                              shape: RoundedRectangleBorder(
+                                borderRadius: BorderRadius.circular(12),
+                              ),
+                            ),
+                            child: const Text('Cancel'),
+                          ),
+                        ),
+                        const SizedBox(width: 12),
+                        Expanded(
+                          child: ElevatedButton(
+                            onPressed: () {
+                              Navigator.pop(
+                                sheetContext,
+                                TimeOfDay(
+                                  hour: tempValue.hour,
+                                  minute: tempValue.minute,
+                                ),
+                              );
+                            },
+                            style: ElevatedButton.styleFrom(
+                              minimumSize: const Size.fromHeight(48),
+                              backgroundColor: AppColors.primary,
+                              foregroundColor: Colors.white,
+                              shape: RoundedRectangleBorder(
+                                borderRadius: BorderRadius.circular(12),
+                              ),
+                              elevation: 0,
+                            ),
+                            child: const Text('Done'),
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        );
+      },
+    );
+  }
+
   Future<void> _pickCustomTime({int? replaceIndex}) async {
     final initial = replaceIndex != null
         ? _times[replaceIndex]
         : const TimeOfDay(hour: 12, minute: 0);
 
-    final picked = await showTimePicker(
-      context: context,
-      initialTime: initial,
-      builder: (context, child) {
-        return MediaQuery(
-          data: MediaQuery.of(context).copyWith(alwaysUse24HourFormat: false),
-          child: child!,
-        );
-      },
-    );
-
+    final picked = await _showTimePickerSheet(initial);
     if (picked == null) return;
 
     _markAsChanged();
+
     setState(() {
       if (replaceIndex != null) {
         _times[replaceIndex] = picked;
@@ -260,6 +480,7 @@ class _CaretakerAddScheduleScreenState
         }
 
         _times.add(picked);
+
         if (_times.length > 1 && _frequencyType == 'daily') {
           _frequencyType = 'multiple_daily';
         }
@@ -295,31 +516,44 @@ class _CaretakerAddScheduleScreenState
     final today = DateTime.now();
     final doses = <TodayDose>[];
 
-    final effectiveTimes = (_frequencyType == 'daily' || _frequencyType == 'multiple_daily')
+    final effectiveTimes =
+    (_frequencyType == 'daily' || _frequencyType == 'multiple_daily')
         ? _times
         : _frequencyType == 'every_x_hours'
-        ? [TimeOfDay.fromDateTime(today.add(Duration(minutes: (_intervalHours * 60).round())))]
+        ? [
+      TimeOfDay.fromDateTime(
+        today.add(
+          Duration(minutes: (_intervalHours * 60).round()),
+        ),
+      ),
+    ]
         : <TimeOfDay>[];
 
     for (final time in effectiveTimes) {
-      final scheduledTime = DateTime(today.year, today.month, today.day, time.hour, time.minute);
+      final scheduledTime =
+      DateTime(today.year, today.month, today.day, time.hour, time.minute);
+
       final weekday = today.weekday % 7;
-      final isScheduledToday = _selectedDays.isEmpty || _selectedDays.length == 7 || _selectedDays.contains(weekday);
+      final isScheduledToday = _selectedDays.isEmpty ||
+          _selectedDays.length == 7 ||
+          _selectedDays.contains(weekday);
 
       if (!isScheduledToday) continue;
 
-      doses.add(TodayDose(
-        scheduleId: 'optimistic_${widget.medicationId}_${time.hour}_${time.minute}',
-        medicationId: widget.medicationId,
-        medicationName: widget.medicationName,
-        genericName: widget.medicationName,
-        dosageAmount: _parseDosageAmount(dosageDisplay),
-        dosageUnit: _parseDosageUnit(dosageDisplay),
-        pillImageUrl: pillImageUrl,
-        scheduledTime: scheduledTime,
-        patientId: widget.patientId,
-        isPending: true,
-      ));
+      doses.add(
+        TodayDose(
+          scheduleId: 'optimistic_${widget.medicationId}_${time.hour}_${time.minute}',
+          medicationId: widget.medicationId,
+          medicationName: widget.medicationName,
+          genericName: widget.medicationName,
+          dosageAmount: _parseDosageAmount(dosageDisplay),
+          dosageUnit: _parseDosageUnit(dosageDisplay),
+          pillImageUrl: pillImageUrl,
+          scheduledTime: scheduledTime,
+          patientId: _resolvedPatientId,
+          isPending: true,
+        ),
+      );
     }
 
     return doses;
@@ -337,19 +571,12 @@ class _CaretakerAddScheduleScreenState
 
   bool _canSave() {
     if (_lastSaveAttempt != null) {
-      final timeSinceLastSave = DateTime.now().difference(_lastSaveAttempt!);
-      if (timeSinceLastSave < _saveCooldown) {
-        debugPrint('Save cooldown active. Please wait ${_saveCooldown.inSeconds - timeSinceLastSave.inSeconds}s');
+      final elapsed = DateTime.now().difference(_lastSaveAttempt!);
+      if (elapsed < _saveCooldown) {
         return false;
       }
     }
-
-    if (_isSaving) {
-      debugPrint('⏳ Save already in progress');
-      return false;
-    }
-
-    return true;
+    return !_isSaving;
   }
 
   Future<void> _saveSchedule() async {
@@ -358,7 +585,8 @@ class _CaretakerAddScheduleScreenState
       return;
     }
 
-    if ((_frequencyType == 'daily' || _frequencyType == 'multiple_daily') && _times.isEmpty) {
+    if ((_frequencyType == 'daily' || _frequencyType == 'multiple_daily') &&
+        _times.isEmpty) {
       AppSnackbar.error(context, 'Please add at least one time');
       return;
     }
@@ -380,16 +608,13 @@ class _CaretakerAddScheduleScreenState
     });
 
     try {
-      debugPrint('Starting caretaker schedule save for medication: ${widget.medicationId}');
-
-      final medication = await MedicationService.instance.getMedicationById(widget.medicationId);
+      final medication =
+      await MedicationService.instance.getMedicationById(widget.medicationId);
 
       if (medication == null) {
-        debugPrint('❌ Medication not found: ${widget.medicationId}');
-        if (mounted) {
-          setState(() => _isSaving = false);
-          AppSnackbar.error(context, 'Medication not found. Please try again.');
-        }
+        if (!mounted) return;
+        setState(() => _isSaving = false);
+        AppSnackbar.error(context, 'Medication not found. Please try again.');
         widget.onSaveFailed?.call('Medication not found');
         return;
       }
@@ -397,53 +622,56 @@ class _CaretakerAddScheduleScreenState
       final dosageDisplay = medication.displayDosage;
       final pillImageUrl = medication.pillImageUrl;
 
-      debugPrint('💊 Medication loaded: ${medication.genericName}');
-
       final optimisticDoses = _buildOptimisticDoses(
         dosageDisplay: dosageDisplay,
         pillImageUrl: pillImageUrl,
       );
-
-      debugPrint(' Built ${optimisticDoses.length} optimistic doses');
       widget.onOptimisticDoses?.call(optimisticDoses);
 
       MedicationSchedule? savedSchedule;
 
       if (_existingSchedule != null) {
-        debugPrint('🔄 Updating existing schedule: ${_existingSchedule!.id}');
         savedSchedule = await ScheduleService.instance.updateSchedule(
           id: _existingSchedule!.id,
           medicationId: widget.medicationId,
           medicationName: widget.medicationName,
           dosageDisplay: dosageDisplay,
+          patientId: _resolvedPatientId,
           frequencyType: _frequencyType,
-          scheduledTimes: (_frequencyType == 'daily' || _frequencyType == 'multiple_daily') ? _times : null,
-          intervalHours: _frequencyType == 'every_x_hours' ? _intervalHours : null,
+          scheduledTimes:
+          (_frequencyType == 'daily' || _frequencyType == 'multiple_daily')
+              ? _times
+              : null,
+          intervalHours:
+          _frequencyType == 'every_x_hours' ? _intervalHours : null,
           scheduledDays: _selectedDays.length == 7 ? null : _selectedDays,
           escalationEnabled: _escalationEnabled,
           pillImageUrl: pillImageUrl,
         );
       } else {
-        debugPrint('➕ Creating new schedule');
         savedSchedule = await ScheduleService.instance.addSchedule(
           medicationId: widget.medicationId,
           medicationName: widget.medicationName,
           dosageDisplay: dosageDisplay,
+          patientId: _resolvedPatientId,
           frequencyType: _frequencyType,
-          scheduledTimes: (_frequencyType == 'daily' || _frequencyType == 'multiple_daily') ? _times : null,
-          intervalHours: _frequencyType == 'every_x_hours' ? _intervalHours : null,
+          scheduledTimes:
+          (_frequencyType == 'daily' || _frequencyType == 'multiple_daily')
+              ? _times
+              : null,
+          intervalHours:
+          _frequencyType == 'every_x_hours' ? _intervalHours : null,
           scheduledDays: _selectedDays.length == 7 ? null : _selectedDays,
           escalationEnabled: _escalationEnabled,
           pillImageUrl: pillImageUrl,
         );
       }
 
-      debugPrint('✅ Schedule saved successfully: ${savedSchedule?.id}');
-
       if (savedSchedule != null) {
         await LocalCacheService.instance.cacheSchedule(savedSchedule);
-        debugPrint('💾 Schedule cached locally');
       }
+
+      if (!mounted) return;
 
       setState(() {
         _scheduleSaved = true;
@@ -451,44 +679,37 @@ class _CaretakerAddScheduleScreenState
         _originalSchedule = savedSchedule;
       });
 
-      if (mounted) {
-        AppSnackbar.success(
-          context,
-          _existingSchedule != null ? 'Schedule updated for ${widget.patientName}!' : 'Schedule saved for ${widget.patientName}!',
-        );
+      AppSnackbar.success(
+        context,
+        _existingSchedule != null
+            ? 'Schedule updated for ${widget.patientName}!'
+            : 'Schedule saved for ${widget.patientName}!',
+      );
 
-        await Future.delayed(const Duration(milliseconds: 500));
-
-        Navigator.pop(context, true);
-      }
-
+      await Future.delayed(const Duration(milliseconds: 400));
+      if (mounted) Navigator.pop(context, true);
       widget.onSaveCompleted?.call();
-      debugPrint('✅ Caretaker schedule save flow completed successfully');
-
     } catch (e, stack) {
       debugPrint('❌ Save schedule error: $e');
-      debugPrint('Stack: $stack');
+      debugPrint('$stack');
 
-      final wasActuallySaved = await _checkIfScheduleExists();
+      final exists = await _checkIfScheduleExists();
 
-      if (wasActuallySaved) {
-        debugPrint('✅ Schedule exists in database despite error - treating as success');
+      if (exists) {
+        if (!mounted) return;
         setState(() {
           _scheduleSaved = true;
           _hasUnsavedChanges = false;
         });
 
-        if (mounted) {
-          AppSnackbar.success(context, 'Schedule saved for ${widget.patientName}!');
-          await Future.delayed(const Duration(milliseconds: 500));
-          Navigator.pop(context, true);
-        }
+        AppSnackbar.success(context, 'Schedule saved for ${widget.patientName}!');
+        await Future.delayed(const Duration(milliseconds: 400));
+        if (mounted) Navigator.pop(context, true);
         widget.onSaveCompleted?.call();
       } else {
-        if (mounted) {
-          setState(() => _isSaving = false);
-          AppSnackbar.error(context, 'Failed to save schedule. Please try again.');
-        }
+        if (!mounted) return;
+        setState(() => _isSaving = false);
+        AppSnackbar.error(context, 'Failed to save schedule. Please try again.');
         widget.onSaveFailed?.call('Failed to save schedule. Please try again.');
       }
     }
@@ -496,8 +717,10 @@ class _CaretakerAddScheduleScreenState
 
   Future<bool> _checkIfScheduleExists() async {
     try {
-      final schedules = await ScheduleService.instance
-          .getSchedulesForMedication(widget.medicationId);
+      final schedules = await ScheduleService.instance.getSchedulesForMedication(
+        widget.medicationId,
+        patientId: _resolvedPatientId,
+      );
       return schedules.isNotEmpty;
     } catch (e) {
       debugPrint('Error checking schedule existence: $e');
@@ -516,7 +739,9 @@ class _CaretakerAddScheduleScreenState
         context: context,
         builder: (context) => AlertDialog(
           title: const Text('Unsaved Changes'),
-          content: const Text('You have unsaved changes. Do you want to discard them?'),
+          content: const Text(
+            'You have unsaved changes. Do you want to discard them?',
+          ),
           actions: [
             TextButton(
               onPressed: () => Navigator.pop(context, false),
@@ -535,6 +760,477 @@ class _CaretakerAddScheduleScreenState
     }
 
     return true;
+  }
+
+  Widget _buildUnsavedNotice() {
+    if (!_hasUnsavedChanges) return const SizedBox.shrink();
+
+    return Container(
+      margin: const EdgeInsets.only(bottom: 12),
+      padding: const EdgeInsets.all(12),
+      decoration: BoxDecoration(
+        color: AppColors.warning.withOpacity(0.10),
+        borderRadius: BorderRadius.circular(10),
+        border: Border.all(
+          color: AppColors.warning.withOpacity(0.25),
+        ),
+      ),
+      child: Row(
+        children: [
+          Icon(Icons.info_outline_rounded, color: AppColors.warning, size: 18),
+          const SizedBox(width: 8),
+          Expanded(
+            child: Text(
+              'You have unsaved changes. Tap save to apply them.',
+              style: AppTextStyles.bodySmall.copyWith(
+                color: AppColors.warning,
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildBottomBar() {
+    return Container(
+      padding: const EdgeInsets.fromLTRB(16, 12, 16, 16),
+      decoration: BoxDecoration(
+        color: AppColors.surface,
+        boxShadow: [
+          BoxShadow(
+            color: Colors.black.withValues(alpha: 0.05),
+            blurRadius: 14,
+            offset: const Offset(0, -3),
+          ),
+        ],
+      ),
+      child: SafeArea(
+        top: false,
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            _buildUnsavedNotice(),
+            AppButton(
+              label: _isSaving
+                  ? 'Saving...'
+                  : (_existingSchedule != null
+                  ? 'Update Schedule'
+                  : 'Save Schedule'),
+              icon: _isSaving ? null : Icons.check_rounded,
+              isLoading: _isSaving,
+              onPressed: _isSaving ? null : _saveSchedule,
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  List<Widget> _buildContent() {
+    return [
+      Container(
+        padding: const EdgeInsets.all(16),
+        decoration: BoxDecoration(
+          color: AppColors.primary.withValues(alpha: 0.10),
+          borderRadius: BorderRadius.circular(14),
+        ),
+        child: Row(
+          children: [
+            Icon(Icons.person_rounded, color: AppColors.primary),
+            const SizedBox(width: 12),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    'Schedule for',
+                    style: AppTextStyles.bodySmall.copyWith(
+                      color: AppColors.textSecondary,
+                    ),
+                  ),
+                  Text(
+                    widget.patientName,
+                    style: AppTextStyles.titleMedium.copyWith(
+                      color: AppColors.primary,
+                      fontWeight: FontWeight.w700,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ],
+        ),
+      ),
+      const SizedBox(height: 16),
+      Container(
+        padding: const EdgeInsets.all(16),
+        decoration: BoxDecoration(
+          color: AppColors.secondary.withValues(alpha: 0.10),
+          borderRadius: BorderRadius.circular(14),
+        ),
+        child: Row(
+          children: [
+            const Icon(Icons.medication_rounded, color: AppColors.secondary),
+            const SizedBox(width: 12),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(widget.medicationName, style: AppTextStyles.titleMedium),
+                  if (_existingSchedule != null)
+                    Text(
+                      'Existing schedule',
+                      style: AppTextStyles.bodySmall.copyWith(
+                        color: AppColors.textSecondary,
+                      ),
+                    ),
+                ],
+              ),
+            ),
+            if (_existingSchedule != null)
+              Icon(
+                Icons.edit_rounded,
+                color: AppColors.textSecondary,
+                size: 20,
+              ),
+          ],
+        ),
+      ),
+      const SizedBox(height: 24),
+
+      if (_frequencyType != 'as_needed' &&
+          _frequencyType != 'every_x_hours') ...[
+        _SectionHeader(
+          icon: Icons.flash_on_rounded,
+          title: 'Quick Setup',
+          subtitle: 'Tap to apply a common schedule',
+        ),
+        const SizedBox(height: 12),
+        SizedBox(
+          height: 90,
+          child: ListView.separated(
+            scrollDirection: Axis.horizontal,
+            itemCount: _schedulePresets.length,
+            separatorBuilder: (_, __) => const SizedBox(width: 10),
+            itemBuilder: (context, index) {
+              final preset = _schedulePresets[index];
+              return _PresetCard(
+                name: preset.name,
+                description: preset.description,
+                onTap: () => _applyPreset(preset),
+              );
+            },
+          ),
+        ),
+        const SizedBox(height: 24),
+      ],
+
+      _SectionHeader(icon: Icons.repeat_rounded, title: 'How often?'),
+      const SizedBox(height: 12),
+
+      _FrequencyOption(
+        label: 'Once a day',
+        description: 'One dose per day',
+        icon: Icons.wb_sunny_outlined,
+        selected: _frequencyType == 'daily',
+        onTap: () {
+          _markAsChanged();
+          setState(() {
+            _frequencyType = 'daily';
+            if (_times.length > 1) _times = [_times.first];
+            if (_times.isEmpty) {
+              _times = [const TimeOfDay(hour: 8, minute: 0)];
+            }
+          });
+        },
+      ),
+      const SizedBox(height: 8),
+
+      _FrequencyOption(
+        label: 'Multiple times a day',
+        description: 'Set specific times',
+        icon: Icons.schedule_rounded,
+        selected: _frequencyType == 'multiple_daily',
+        onTap: () {
+          _markAsChanged();
+          setState(() => _frequencyType = 'multiple_daily');
+        },
+      ),
+      const SizedBox(height: 8),
+
+      _FrequencyOption(
+        label: 'Every X hours',
+        description: 'Strict interval spacing',
+        icon: Icons.timer_outlined,
+        selected: _frequencyType == 'every_x_hours',
+        onTap: () {
+          _markAsChanged();
+          setState(() => _frequencyType = 'every_x_hours');
+        },
+      ),
+      const SizedBox(height: 8),
+
+      _FrequencyOption(
+        label: 'As needed',
+        description: 'No fixed schedule',
+        icon: Icons.medical_services_outlined,
+        selected: _frequencyType == 'as_needed',
+        onTap: () {
+          _markAsChanged();
+          setState(() => _frequencyType = 'as_needed');
+        },
+      ),
+
+      if (_frequencyType == 'daily' || _frequencyType == 'multiple_daily') ...[
+        const SizedBox(height: 24),
+        _SectionHeader(
+          icon: Icons.access_time_rounded,
+          title: 'Reminder times',
+          subtitle: '${_times.length} ${_times.length == 1 ? "time" : "times"} set',
+        ),
+        const SizedBox(height: 12),
+
+        if (_frequencyType == 'multiple_daily' || _times.length < 2) ...[
+          Text(
+            'Quick add',
+            style: AppTextStyles.labelMedium.copyWith(
+              color: AppColors.textSecondary,
+            ),
+          ),
+          const SizedBox(height: 8),
+          Wrap(
+            spacing: 8,
+            runSpacing: 8,
+            children: _timePresets.map((preset) {
+              final alreadyAdded = _times.any(
+                    (t) =>
+                t.hour == preset.time.hour &&
+                    t.minute == preset.time.minute,
+              );
+
+              return _TimePresetChip(
+                label: preset.label,
+                icon: preset.icon,
+                time: preset.time,
+                disabled: alreadyAdded,
+                onTap: alreadyAdded ? null : () => _addTimePreset(preset),
+              );
+            }).toList(),
+          ),
+          const SizedBox(height: 16),
+        ],
+
+        if (_times.isNotEmpty) ...[
+          Text(
+            'Selected times',
+            style: AppTextStyles.labelMedium.copyWith(
+              color: AppColors.textSecondary,
+            ),
+          ),
+          const SizedBox(height: 8),
+          ..._times.asMap().entries.map(
+                (entry) => _TimeSlotTile(
+              time: entry.value,
+              canRemove:
+              _times.length > 1 || _frequencyType == 'multiple_daily',
+              onTap: () => _pickCustomTime(replaceIndex: entry.key),
+              onRemove: () {
+                _markAsChanged();
+                setState(() => _times.removeAt(entry.key));
+              },
+            ),
+          ),
+        ],
+
+        if (_frequencyType == 'multiple_daily' || _times.isEmpty)
+          Padding(
+            padding: const EdgeInsets.only(top: 8),
+            child: OutlinedButton.icon(
+              onPressed: _pickCustomTime,
+              icon: const Icon(Icons.add_rounded, size: 20),
+              label: const Text('Add custom time'),
+              style: OutlinedButton.styleFrom(
+                minimumSize: const Size.fromHeight(48),
+                foregroundColor: AppColors.primary,
+                side: const BorderSide(color: AppColors.primary),
+                shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(12),
+                ),
+              ),
+            ),
+          ),
+      ],
+
+      if (_frequencyType == 'every_x_hours') ...[
+        const SizedBox(height: 24),
+        _SectionHeader(
+          icon: Icons.timer_outlined,
+          title: 'Interval',
+          subtitle: 'Every ${_intervalHours.toInt()} hours',
+        ),
+        const SizedBox(height: 16),
+        Container(
+          padding: const EdgeInsets.all(16),
+          decoration: BoxDecoration(
+            color: AppColors.surface,
+            borderRadius: BorderRadius.circular(12),
+            border: Border.all(color: AppColors.border),
+          ),
+          child: Column(
+            children: [
+              Row(
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: [
+                  Text(
+                    '${_intervalHours.toInt()}',
+                    style: AppTextStyles.h1.copyWith(
+                      color: AppColors.primary,
+                      fontWeight: FontWeight.w800,
+                    ),
+                  ),
+                  const SizedBox(width: 8),
+                  Text(
+                    'hours',
+                    style: AppTextStyles.titleMedium.copyWith(
+                      color: AppColors.textSecondary,
+                    ),
+                  ),
+                ],
+              ),
+              Slider(
+                value: _intervalHours,
+                min: 1,
+                max: 24,
+                divisions: 23,
+                label: '${_intervalHours.toInt()}h',
+                onChanged: (value) {
+                  _markAsChanged();
+                  setState(() => _intervalHours = value);
+                },
+              ),
+              Row(
+                mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                children: [
+                  Text('1h', style: AppTextStyles.bodySmall),
+                  Text('24h', style: AppTextStyles.bodySmall),
+                ],
+              ),
+            ],
+          ),
+        ),
+      ],
+
+      if (_frequencyType != 'as_needed') ...[
+        const SizedBox(height: 24),
+        _SectionHeader(
+          icon: Icons.calendar_today_rounded,
+          title: 'Which days?',
+          subtitle: _selectedDays.length == 7
+              ? 'Every day'
+              : '${_selectedDays.length} ${_selectedDays.length == 1 ? "day" : "days"} selected',
+        ),
+        const SizedBox(height: 12),
+
+        Row(
+          children: [
+            Expanded(
+              child: _DayQuickChip(
+                label: 'All days',
+                selected: _selectedDays.length == 7,
+                onTap: _selectAllDays,
+              ),
+            ),
+            const SizedBox(width: 8),
+            Expanded(
+              child: _DayQuickChip(
+                label: 'Weekdays',
+                selected: _selectedDays.length == 5 &&
+                    _selectedDays.every((d) => d >= 1 && d <= 5),
+                onTap: _selectWeekdays,
+              ),
+            ),
+            const SizedBox(width: 8),
+            Expanded(
+              child: _DayQuickChip(
+                label: 'Weekends',
+                selected: _selectedDays.length == 2 &&
+                    _selectedDays.contains(0) &&
+                    _selectedDays.contains(6),
+                onTap: _selectWeekends,
+              ),
+            ),
+          ],
+        ),
+        const SizedBox(height: 16),
+
+        Row(
+          mainAxisAlignment: MainAxisAlignment.spaceBetween,
+          children: List.generate(7, (index) {
+            final selected = _selectedDays.contains(index);
+
+            return InkWell(
+              onTap: () {
+                _markAsChanged();
+                setState(() {
+                  if (selected) {
+                    if (_selectedDays.length > 1) _selectedDays.remove(index);
+                  } else {
+                    _selectedDays.add(index);
+                  }
+                });
+              },
+              borderRadius: BorderRadius.circular(50),
+              child: AnimatedContainer(
+                duration: const Duration(milliseconds: 200),
+                width: 42,
+                height: 42,
+                alignment: Alignment.center,
+                decoration: BoxDecoration(
+                  color: selected ? AppColors.primary : AppColors.surface,
+                  border: Border.all(
+                    color: selected ? AppColors.primary : AppColors.border,
+                    width: selected ? 2 : 1,
+                  ),
+                  shape: BoxShape.circle,
+                  boxShadow: selected
+                      ? [
+                    BoxShadow(
+                      color: AppColors.primary.withValues(alpha: 0.3),
+                      blurRadius: 8,
+                      offset: const Offset(0, 2),
+                    ),
+                  ]
+                      : null,
+                ),
+                child: Text(
+                  _weekdays[index],
+                  style: TextStyle(
+                    color: selected ? Colors.white : AppColors.textPrimary,
+                    fontSize: 11,
+                    fontWeight: FontWeight.w700,
+                  ),
+                ),
+              ),
+            );
+          }),
+        ),
+      ],
+
+      const SizedBox(height: 28),
+
+      if (_frequencyType != 'as_needed' &&
+          (_times.isNotEmpty || _frequencyType == 'every_x_hours'))
+        _ScheduleSummary(
+          frequencyType: _frequencyType,
+          times: _times,
+          intervalHours: _intervalHours,
+          selectedDays: _selectedDays,
+          weekdays: _weekdays,
+        ),
+
+      const SizedBox(height: 24),
+    ];
   }
 
   @override
@@ -589,13 +1285,17 @@ class _CaretakerAddScheduleScreenState
         }
       },
       child: Scaffold(
+        resizeToAvoidBottomInset: true,
         appBar: AppBar(
-          title: Text(_existingSchedule != null ? 'Edit Schedule' : 'Set Schedule'),
+          title: Text(
+            _existingSchedule != null ? 'Edit Schedule' : 'Set Schedule',
+          ),
           actions: [
             if (_hasUnsavedChanges && !_isSaving)
               Container(
                 margin: const EdgeInsets.only(right: 8),
-                padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+                padding:
+                const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
                 decoration: BoxDecoration(
                   color: AppColors.warning.withOpacity(0.2),
                   borderRadius: BorderRadius.circular(20),
@@ -603,20 +1303,33 @@ class _CaretakerAddScheduleScreenState
                 child: Row(
                   mainAxisSize: MainAxisSize.min,
                   children: [
-                    Icon(Icons.edit_rounded, size: 14, color: AppColors.warning),
+                    Icon(
+                      Icons.edit_rounded,
+                      size: 14,
+                      color: AppColors.warning,
+                    ),
                     const SizedBox(width: 4),
-                    Text('Unsaved', style: AppTextStyles.labelSmall.copyWith(color: AppColors.warning)),
+                    Text(
+                      'Unsaved',
+                      style: AppTextStyles.labelSmall.copyWith(
+                        color: AppColors.warning,
+                      ),
+                    ),
                   ],
                 ),
               ),
             TextButton(
-              onPressed: _isSaving ? null : () async {
+              onPressed: _isSaving
+                  ? null
+                  : () async {
                 if (_hasUnsavedChanges) {
                   final shouldDiscard = await showDialog<bool>(
                     context: context,
                     builder: (context) => AlertDialog(
                       title: const Text('Skip Scheduling?'),
-                      content: const Text('Your changes will be lost. Continue?'),
+                      content: const Text(
+                        'Your changes will be lost. Continue?',
+                      ),
                       actions: [
                         TextButton(
                           onPressed: () => Navigator.pop(context, false),
@@ -624,7 +1337,9 @@ class _CaretakerAddScheduleScreenState
                         ),
                         TextButton(
                           onPressed: () => Navigator.pop(context, true),
-                          style: TextButton.styleFrom(foregroundColor: AppColors.error),
+                          style: TextButton.styleFrom(
+                            foregroundColor: AppColors.error,
+                          ),
                           child: const Text('Skip'),
                         ),
                       ],
@@ -642,291 +1357,18 @@ class _CaretakerAddScheduleScreenState
             ),
           ],
         ),
-        body: ListView(
-          padding: const EdgeInsets.all(20),
-          children: [
-            // Patient info banner
-            Container(
-              padding: const EdgeInsets.all(16),
-              decoration: BoxDecoration(
-                color: AppColors.primary.withValues(alpha: 0.1),
-                borderRadius: BorderRadius.circular(12),
-              ),
-              child: Row(
-                children: [
-                  Icon(Icons.person_rounded, color: AppColors.primary),
-                  const SizedBox(width: 12),
-                  Expanded(
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Text(
-                          'Schedule for',
-                          style: AppTextStyles.bodySmall.copyWith(
-                            color: AppColors.textSecondary,
-                          ),
-                        ),
-                        Text(
-                          widget.patientName,
-                          style: AppTextStyles.titleMedium.copyWith(
-                            color: AppColors.primary,
-                            fontWeight: FontWeight.w700,
-                          ),
-                        ),
-                      ],
-                    ),
-                  ),
-                ],
-              ),
-            ),
-            const SizedBox(height: 16),
-
-            // Medication header
-            Container(
-              padding: const EdgeInsets.all(16),
-              decoration: BoxDecoration(
-                color: AppColors.secondary.withValues(alpha: 0.1),
-                borderRadius: BorderRadius.circular(12),
-              ),
-              child: Row(
-                children: [
-                  const Icon(Icons.medication_rounded, color: AppColors.secondary),
-                  const SizedBox(width: 12),
-                  Expanded(
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Text(widget.medicationName, style: AppTextStyles.titleMedium),
-                        if (_existingSchedule != null)
-                          Text(
-                            'Existing schedule',
-                            style: AppTextStyles.bodySmall.copyWith(color: AppColors.textSecondary),
-                          ),
-                      ],
-                    ),
-                  ),
-                  if (_existingSchedule != null)
-                    Icon(Icons.edit_rounded, color: AppColors.textSecondary, size: 20),
-                ],
-              ),
-            ),
-            const SizedBox(height: 24),
-
-            // Quick Presets
-            if (_frequencyType != 'as_needed' && _frequencyType != 'every_x_hours') ...[
-              _SectionHeader(icon: Icons.flash_on_rounded, title: 'Quick Setup', subtitle: 'Tap to apply a common schedule'),
-              const SizedBox(height: 12),
-              SizedBox(
-                height: 90,
-                child: ListView.separated(
-                  scrollDirection: Axis.horizontal,
-                  itemCount: _schedulePresets.length,
-                  separatorBuilder: (_, __) => const SizedBox(width: 10),
-                  itemBuilder: (context, index) {
-                    final preset = _schedulePresets[index];
-                    return _PresetCard(name: preset.name, description: preset.description, onTap: () => _applyPreset(preset));
-                  },
+        body: SafeArea(
+          child: Column(
+            children: [
+              Expanded(
+                child: ListView(
+                  padding: const EdgeInsets.fromLTRB(16, 16, 16, 8),
+                  children: _buildContent(),
                 ),
               ),
-              const SizedBox(height: 24),
+              _buildBottomBar(),
             ],
-
-            // Frequency type
-            _SectionHeader(icon: Icons.repeat_rounded, title: 'How often?'),
-            const SizedBox(height: 12),
-
-            _FrequencyOption(label: 'Once a day', description: 'One dose per day', icon: Icons.wb_sunny_outlined, selected: _frequencyType == 'daily', onTap: () {
-              _markAsChanged();
-              setState(() {
-                _frequencyType = 'daily';
-                if (_times.length > 1) _times = [_times.first];
-                if (_times.isEmpty) _times = [const TimeOfDay(hour: 8, minute: 0)];
-              });
-            }),
-            const SizedBox(height: 8),
-
-            _FrequencyOption(label: 'Multiple times a day', description: 'Set specific times', icon: Icons.schedule_rounded, selected: _frequencyType == 'multiple_daily', onTap: () {
-              _markAsChanged();
-              setState(() => _frequencyType = 'multiple_daily');
-            }),
-            const SizedBox(height: 8),
-
-            _FrequencyOption(label: 'Every X hours', description: 'Strict interval spacing', icon: Icons.timer_outlined, selected: _frequencyType == 'every_x_hours', onTap: () {
-              _markAsChanged();
-              setState(() => _frequencyType = 'every_x_hours');
-            }),
-            const SizedBox(height: 8),
-
-            _FrequencyOption(label: 'As needed', description: 'No fixed schedule', icon: Icons.medical_services_outlined, selected: _frequencyType == 'as_needed', onTap: () {
-              _markAsChanged();
-              setState(() => _frequencyType = 'as_needed');
-            }),
-
-            // Time slots
-            if (_frequencyType == 'daily' || _frequencyType == 'multiple_daily') ...[
-              const SizedBox(height: 24),
-              _SectionHeader(icon: Icons.access_time_rounded, title: 'Reminder times', subtitle: '${_times.length} ${_times.length == 1 ? "time" : "times"} set'),
-              const SizedBox(height: 12),
-
-              if (_frequencyType == 'multiple_daily' || _times.length < 2) ...[
-                Text('Quick add', style: AppTextStyles.labelMedium.copyWith(color: AppColors.textSecondary)),
-                const SizedBox(height: 8),
-                Wrap(
-                  spacing: 8,
-                  runSpacing: 8,
-                  children: _timePresets.map((preset) {
-                    final alreadyAdded = _times.any((t) => t.hour == preset.time.hour && t.minute == preset.time.minute);
-                    return _TimePresetChip(label: preset.label, icon: preset.icon, time: preset.time, disabled: alreadyAdded, onTap: alreadyAdded ? null : () => _addTimePreset(preset));
-                  }).toList(),
-                ),
-                const SizedBox(height: 16),
-              ],
-
-              if (_times.isNotEmpty) ...[
-                Text('Selected times', style: AppTextStyles.labelMedium.copyWith(color: AppColors.textSecondary)),
-                const SizedBox(height: 8),
-                ..._times.asMap().entries.map((entry) => _TimeSlotTile(
-                  time: entry.value,
-                  canRemove: _times.length > 1 || _frequencyType == 'multiple_daily',
-                  onTap: () => _pickCustomTime(replaceIndex: entry.key),
-                  onRemove: () {
-                    _markAsChanged();
-                    setState(() => _times.removeAt(entry.key));
-                  },
-                )),
-              ],
-
-              if (_frequencyType == 'multiple_daily' || _times.isEmpty)
-                Padding(
-                  padding: const EdgeInsets.only(top: 8),
-                  child: OutlinedButton.icon(
-                    onPressed: () => _pickCustomTime(),
-                    icon: const Icon(Icons.add_rounded, size: 20),
-                    label: const Text('Add custom time'),
-                    style: OutlinedButton.styleFrom(
-                      minimumSize: const Size.fromHeight(48),
-                      foregroundColor: AppColors.primary,
-                      side: const BorderSide(color: AppColors.primary),
-                      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-                    ),
-                  ),
-                ),
-            ],
-
-            // Interval slider
-            if (_frequencyType == 'every_x_hours') ...[
-              const SizedBox(height: 24),
-              _SectionHeader(icon: Icons.timer_outlined, title: 'Interval', subtitle: 'Every ${_intervalHours.toInt()} hours'),
-              const SizedBox(height: 16),
-              Container(
-                padding: const EdgeInsets.all(16),
-                decoration: BoxDecoration(color: AppColors.surface, borderRadius: BorderRadius.circular(12), border: Border.all(color: AppColors.border)),
-                child: Column(
-                  children: [
-                    Row(mainAxisAlignment: MainAxisAlignment.center, children: [
-                      Text('${_intervalHours.toInt()}', style: AppTextStyles.h1.copyWith(color: AppColors.primary, fontWeight: FontWeight.w800)),
-                      const SizedBox(width: 8),
-                      Text('hours', style: AppTextStyles.titleMedium.copyWith(color: AppColors.textSecondary)),
-                    ]),
-                    Slider(value: _intervalHours, min: 1, max: 24, divisions: 23, label: '${_intervalHours.toInt()}h', onChanged: (value) {
-                      _markAsChanged();
-                      setState(() => _intervalHours = value);
-                    }),
-                    Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children: [Text('1h', style: AppTextStyles.bodySmall), Text('24h', style: AppTextStyles.bodySmall)]),
-                  ],
-                ),
-              ),
-            ],
-
-            // Day picker
-            if (_frequencyType != 'as_needed') ...[
-              const SizedBox(height: 24),
-              _SectionHeader(icon: Icons.calendar_today_rounded, title: 'Which days?', subtitle: _selectedDays.length == 7 ? 'Every day' : '${_selectedDays.length} ${_selectedDays.length == 1 ? "day" : "days"} selected'),
-              const SizedBox(height: 12),
-
-              Row(children: [
-                Expanded(child: _DayQuickChip(label: 'All days', selected: _selectedDays.length == 7, onTap: _selectAllDays)),
-                const SizedBox(width: 8),
-                Expanded(child: _DayQuickChip(label: 'Weekdays', selected: _selectedDays.length == 5 && _selectedDays.every((d) => d >= 1 && d <= 5), onTap: _selectWeekdays)),
-                const SizedBox(width: 8),
-                Expanded(child: _DayQuickChip(label: 'Weekends', selected: _selectedDays.length == 2 && _selectedDays.contains(0) && _selectedDays.contains(6), onTap: _selectWeekends)),
-              ]),
-              const SizedBox(height: 16),
-
-              Row(
-                mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                children: List.generate(7, (index) {
-                  final selected = _selectedDays.contains(index);
-                  return InkWell(
-                    onTap: () {
-                      _markAsChanged();
-                      setState(() {
-                        if (selected) {
-                          if (_selectedDays.length > 1) _selectedDays.remove(index);
-                        } else {
-                          _selectedDays.add(index);
-                        }
-                      });
-                    },
-                    borderRadius: BorderRadius.circular(50),
-                    child: AnimatedContainer(
-                      duration: const Duration(milliseconds: 200),
-                      width: 42,
-                      height: 42,
-                      alignment: Alignment.center,
-                      decoration: BoxDecoration(
-                        color: selected ? AppColors.primary : AppColors.surface,
-                        border: Border.all(color: selected ? AppColors.primary : AppColors.border, width: selected ? 2 : 1),
-                        shape: BoxShape.circle,
-                        boxShadow: selected ? [BoxShadow(color: AppColors.primary.withValues(alpha: 0.3), blurRadius: 8, offset: const Offset(0, 2))] : null,
-                      ),
-                      child: Text(_weekdays[index], style: TextStyle(color: selected ? Colors.white : AppColors.textPrimary, fontSize: 11, fontWeight: FontWeight.w700)),
-                    ),
-                  );
-                }),
-              ),
-            ],
-
-            const SizedBox(height: 32),
-
-            // Summary card
-            if (_frequencyType != 'as_needed' && _times.isNotEmpty)
-              _ScheduleSummary(frequencyType: _frequencyType, times: _times, intervalHours: _intervalHours, selectedDays: _selectedDays, weekdays: _weekdays),
-
-            const SizedBox(height: 20),
-
-            AppButton(
-              label: _isSaving
-                  ? 'Saving...'
-                  : (_existingSchedule != null ? 'Update Schedule' : 'Save Schedule'),
-              icon: _isSaving ? null : Icons.check_rounded,
-              isLoading: _isSaving,
-              onPressed: _isSaving ? null : _saveSchedule,
-            ),
-            const SizedBox(height: 20),
-
-            if (_hasUnsavedChanges)
-              Container(
-                padding: const EdgeInsets.all(12),
-                decoration: BoxDecoration(
-                  color: AppColors.warning.withOpacity(0.1),
-                  borderRadius: BorderRadius.circular(8),
-                  border: Border.all(color: AppColors.warning.withOpacity(0.3)),
-                ),
-                child: Row(
-                  children: [
-                    Icon(Icons.info_outline_rounded, color: AppColors.warning, size: 20),
-                    const SizedBox(width: 8),
-                    Expanded(
-                      child: Text(
-                        'You have unsaved changes. Tap save to apply them.',
-                        style: AppTextStyles.bodySmall.copyWith(color: AppColors.warning),
-                      ),
-                    ),
-                  ],
-                ),
-              ),
-          ],
+          ),
         ),
       ),
     );
@@ -980,10 +1422,6 @@ class _SectionHeader extends StatelessWidget {
     );
   }
 }
-
-// ══════════════════════════════════════════════════════════════
-// PRESET CARD
-// ══════════════════════════════════════════════════════════════
 
 class _PresetCard extends StatelessWidget {
   final String name;
@@ -1044,10 +1482,6 @@ class _PresetCard extends StatelessWidget {
     );
   }
 }
-
-// ══════════════════════════════════════════════════════════════
-// TIME PRESET CHIP
-// ══════════════════════════════════════════════════════════════
 
 class _TimePresetChip extends StatelessWidget {
   final String label;
@@ -1125,10 +1559,6 @@ class _TimePresetChip extends StatelessWidget {
   }
 }
 
-// ══════════════════════════════════════════════════════════════
-// DAY QUICK CHIP
-// ══════════════════════════════════════════════════════════════
-
 class _DayQuickChip extends StatelessWidget {
   final String label;
   final bool selected;
@@ -1170,10 +1600,6 @@ class _DayQuickChip extends StatelessWidget {
     );
   }
 }
-
-// ══════════════════════════════════════════════════════════════
-// SCHEDULE SUMMARY
-// ══════════════════════════════════════════════════════════════
 
 class _ScheduleSummary extends StatelessWidget {
   final String frequencyType;
@@ -1266,10 +1692,6 @@ class _ScheduleSummary extends StatelessWidget {
   }
 }
 
-// ══════════════════════════════════════════════════════════════
-// FREQUENCY OPTION
-// ══════════════════════════════════════════════════════════════
-
 class _FrequencyOption extends StatelessWidget {
   final String label;
   final String description;
@@ -1343,10 +1765,6 @@ class _FrequencyOption extends StatelessWidget {
     );
   }
 }
-
-// ══════════════════════════════════════════════════════════════
-// TIME SLOT TILE
-// ══════════════════════════════════════════════════════════════
 
 class _TimeSlotTile extends StatelessWidget {
   final TimeOfDay time;
@@ -1454,10 +1872,6 @@ class _TimeSlotTile extends StatelessWidget {
     );
   }
 }
-
-// ══════════════════════════════════════════════════════════════
-// DATA CLASSES
-// ══════════════════════════════════════════════════════════════
 
 class _TimePreset {
   final String label;

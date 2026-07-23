@@ -171,17 +171,6 @@ class _ActivityFilterBottomSheetState extends State<ActivityFilterBottomSheet> {
                           });
                         },
                       ),
-                      _FilterChip(
-                        label: 'Skipped',
-                        icon: Icons.remove_circle_rounded,
-                        color: AppColors.textSecondary,
-                        isSelected: _selectedStatus == 'skipped',
-                        onTap: () {
-                          setState(() {
-                            _selectedStatus = 'skipped';
-                          });
-                        },
-                      ),
                     ],
                   ),
                 ],

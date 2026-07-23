@@ -1,5 +1,3 @@
-// lib/home/caretaker/caretaker_dashboard_tab.dart
-
 import 'package:flutter/material.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 
@@ -74,11 +72,34 @@ class _CaretakerDashboardTabState extends State<CaretakerDashboardTab> {
             _activities = activities;
           });
         }
+
+        // ✅ Keep stats fresh when live activity changes
+        _loadStatsOnly();
       },
       onError: (error) {
         debugPrint('❌ Activity subscription error: $error');
       },
     );
+  }
+
+  Future<void> _loadStatsOnly() async {
+    if (_profile == null) return;
+
+    try {
+      final stats = await PatientActivityService.instance.getActivityStats(
+        caregiverId: _profile!.id,
+        patientId: _selectedPatientId,
+      );
+
+      if (mounted) {
+        setState(() {
+          _stats = stats;
+        });
+      }
+    } catch (error, stack) {
+      debugPrint('❌ Failed to load activity stats: $error');
+      debugPrint('$stack');
+    }
   }
 
   Future<void> _loadInitialData() async {
@@ -164,7 +185,8 @@ class _CaretakerDashboardTabState extends State<CaretakerDashboardTab> {
   }
 
   bool get _hasActiveFilters =>
-      _selectedPatientId != null || (_selectedStatus != null && _selectedStatus != 'all');
+      _selectedPatientId != null ||
+          (_selectedStatus != null && _selectedStatus != 'all');
 
   @override
   Widget build(BuildContext context) {
@@ -178,7 +200,6 @@ class _CaretakerDashboardTabState extends State<CaretakerDashboardTab> {
       child: ListView(
         padding: const EdgeInsets.all(16),
         children: [
-
           // Stats Grid
           if (_stats.isNotEmpty) ...[
             Row(
@@ -205,28 +226,12 @@ class _CaretakerDashboardTabState extends State<CaretakerDashboardTab> {
               ],
             ),
             const SizedBox(height: 12),
-            Row(
-              children: [
-                Expanded(
-                  child: _StatCard(
-                    icon: Icons.pending_rounded,
-                    iconColor: AppColors.warning,
-                    label: 'Pending',
-                    value: '${_stats['pending'] ?? 0}',
-                    suffix: 'doses',
-                  ),
-                ),
-                const SizedBox(width: 12),
-                Expanded(
-                  child: _StatCard(
-                    icon: Icons.remove_circle_rounded,
-                    iconColor: AppColors.textSecondary,
-                    label: 'Skipped',
-                    value: '${_stats['skipped'] ?? 0}',
-                    suffix: 'doses',
-                  ),
-                ),
-              ],
+            _StatCard(
+              icon: Icons.pending_rounded,
+              iconColor: AppColors.warning,
+              label: 'Pending',
+              value: '${_stats['pending'] ?? 0}',
+              suffix: 'doses',
             ),
             const SizedBox(height: 32),
           ],
@@ -257,7 +262,9 @@ class _CaretakerDashboardTabState extends State<CaretakerDashboardTab> {
               IconButton(
                 icon: Icon(
                   Icons.filter_list_rounded,
-                  color: _hasActiveFilters ? AppColors.primary : AppColors.textSecondary,
+                  color: _hasActiveFilters
+                      ? AppColors.primary
+                      : AppColors.textSecondary,
                 ),
                 onPressed: _openFilterSheet,
                 tooltip: 'Filter activities',
@@ -307,13 +314,15 @@ class _CaretakerDashboardTabState extends State<CaretakerDashboardTab> {
               ),
             )
           else
-            ..._activities.map((activity) => Padding(
-              padding: const EdgeInsets.only(bottom: 12),
-              child: PatientActivityCard(
-                activity: activity,
-                onTap: () => _showActivityDetail(activity),
+            ..._activities.map(
+                  (activity) => Padding(
+                padding: const EdgeInsets.only(bottom: 12),
+                child: PatientActivityCard(
+                  activity: activity,
+                  onTap: () => _showActivityDetail(activity),
+                ),
               ),
-            )),
+            ),
 
           const SizedBox(height: 24),
 
@@ -476,13 +485,7 @@ class _CaretakerDashboardSkeleton extends StatelessWidget {
           ],
         ),
         SizedBox(height: 12),
-        Row(
-          children: [
-            Expanded(child: SkeletonBox(height: 100, borderRadius: 16)),
-            SizedBox(width: 12),
-            Expanded(child: SkeletonBox(height: 100, borderRadius: 16)),
-          ],
-        ),
+        SkeletonBox(height: 100, borderRadius: 16),
         SizedBox(height: 32),
         SkeletonBox(height: 20, width: 150),
         SizedBox(height: 12),

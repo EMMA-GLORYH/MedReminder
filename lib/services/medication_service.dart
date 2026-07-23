@@ -44,11 +44,15 @@ class MedicationService {
   }) async {
     final userId = _requireUserId();
 
+    if (patientId.trim().isEmpty) {
+      throw Exception('Patient ID is required to save medication');
+    }
+
     try {
       final data = await supabase
           .from('medications')
           .insert(<String, dynamic>{
-        'patient_id': userId,
+        'patient_id': patientId, // ✅ FIXED: Uses patientId, not userId!
         'generic_name': genericName.trim(),
         'brand_name': brandName?.trim().isEmpty == true
             ? null
@@ -69,10 +73,7 @@ class MedicationService {
           .select()
           .single();
 
-      debugPrint(
-        '✅ Medication saved with ID: ${data['id']}',
-      );
-
+      debugPrint('✅ Medication saved with ID: ${data['id']} for patient: $patientId');
       return Medication.fromJson(data);
     } catch (error, stack) {
       debugPrint('❌ Failed to save medication: $error');
@@ -192,9 +193,7 @@ class MedicationService {
 
       return Medication.fromJson(data);
     } catch (error, stack) {
-      debugPrint(
-        '❌ Failed to fetch medication $id: $error',
-      );
+      debugPrint('❌ Failed to fetch medication $id: $error');
       debugPrint('$stack');
       rethrow;
     }
@@ -204,10 +203,6 @@ class MedicationService {
   // CARETAKER PATIENT MEDICATIONS
   // ══════════════════════════════════════════════════════════════
 
-  /// Loads active medications belonging to one selected patient.
-  ///
-  /// The current user must be an active caretaker of [patientId] and the
-  /// relationship must grant can_view_medications.
   Future<List<Medication>> getMedicationsForPatient(
       String patientId,
       ) async {
@@ -247,10 +242,7 @@ class MedicationService {
           .eq('is_active', true)
           .order('created_at', ascending: false);
 
-      debugPrint(
-        '✅ Loaded ${data.length} medications for patient '
-            '$safePatientId',
-      );
+      debugPrint('✅ Loaded ${data.length} medications for patient $safePatientId');
 
       return (data as List)
           .map(
@@ -260,10 +252,7 @@ class MedicationService {
       )
           .toList();
     } catch (error, stack) {
-      debugPrint(
-        '❌ Failed to load medications for patient '
-            '$safePatientId: $error',
-      );
+      debugPrint('❌ Failed to load medications for patient $safePatientId: $error');
       debugPrint('$stack');
       rethrow;
     }
@@ -290,36 +279,16 @@ class MedicationService {
       'updated_at': DateTime.now().toIso8601String(),
     };
 
-    if (genericName != null) {
-      updates['generic_name'] = genericName.trim();
-    }
-    if (brandName != null) {
-      updates['brand_name'] = brandName.trim();
-    }
-    if (dosageAmount != null) {
-      updates['dosage_amount'] = dosageAmount;
-    }
-    if (dosageUnit != null) {
-      updates['dosage_unit'] = dosageUnit;
-    }
-    if (medicationType != null) {
-      updates['medication_type'] = medicationType;
-    }
-    if (currentQuantity != null) {
-      updates['current_quantity'] = currentQuantity;
-    }
-    if (refillAlertAt != null) {
-      updates['refill_alert_at'] = refillAlertAt;
-    }
-    if (pillColor != null) {
-      updates['pill_color'] = pillColor;
-    }
-    if (pillShape != null) {
-      updates['pill_shape'] = pillShape;
-    }
-    if (notes != null) {
-      updates['notes'] = notes.trim();
-    }
+    if (genericName != null) updates['generic_name'] = genericName.trim();
+    if (brandName != null) updates['brand_name'] = brandName.trim();
+    if (dosageAmount != null) updates['dosage_amount'] = dosageAmount;
+    if (dosageUnit != null) updates['dosage_unit'] = dosageUnit;
+    if (medicationType != null) updates['medication_type'] = medicationType;
+    if (currentQuantity != null) updates['current_quantity'] = currentQuantity;
+    if (refillAlertAt != null) updates['refill_alert_at'] = refillAlertAt;
+    if (pillColor != null) updates['pill_color'] = pillColor;
+    if (pillShape != null) updates['pill_shape'] = pillShape;
+    if (notes != null) updates['notes'] = notes.trim();
 
     final data = await supabase
         .from('medications')
@@ -331,9 +300,7 @@ class MedicationService {
     return Medication.fromJson(data);
   }
 
-  Future<void> deleteMedication(
-      String id,
-      ) async {
+  Future<void> deleteMedication(String id) async {
     await supabase
         .from('medications')
         .update(<String, dynamic>{
@@ -343,9 +310,7 @@ class MedicationService {
         .eq('id', id);
   }
 
-  Future<void> restoreMedication(
-      String id,
-      ) async {
+  Future<void> restoreMedication(String id) async {
     await supabase
         .from('medications')
         .update(<String, dynamic>{
@@ -355,58 +320,143 @@ class MedicationService {
         .eq('id', id);
   }
 
-  Future<void> deleteMedicationWithSchedules(
-      String medicationId,
-      ) async {
+  Future<void> deleteMedicationWithSchedules(String medicationId) async {
     _requireUserId();
-
     final now = DateTime.now().toIso8601String();
 
     await supabase
         .from('medication_schedules')
-        .update(<String, dynamic>{
-      'is_active': false,
-      'updated_at': now,
-    })
+        .update(<String, dynamic>{'is_active': false, 'updated_at': now})
         .eq('medication_id', medicationId);
 
     await supabase
         .from('medications')
-        .update(<String, dynamic>{
-      'is_active': false,
-      'updated_at': now,
-    })
+        .update(<String, dynamic>{'is_active': false, 'updated_at': now})
         .eq('id', medicationId);
   }
 
-  Future<Medication> toggleActive(
-      String medicationId,
-      bool isActive,
-      ) async {
+  Future<Medication> toggleActive(String medicationId, bool isActive) async {
     _requireUserId();
-
     final now = DateTime.now().toIso8601String();
 
     if (!isActive) {
       await supabase
           .from('medication_schedules')
-          .update(<String, dynamic>{
-        'is_active': false,
-        'updated_at': now,
-      })
+          .update(<String, dynamic>{'is_active': false, 'updated_at': now})
           .eq('medication_id', medicationId);
     }
 
     final data = await supabase
         .from('medications')
-        .update(<String, dynamic>{
-      'is_active': isActive,
-      'updated_at': now,
-    })
+        .update(<String, dynamic>{'is_active': isActive, 'updated_at': now})
         .eq('id', medicationId)
         .select()
         .single();
 
     return Medication.fromJson(data);
+  }
+
+
+  Future<Medication?> findDuplicateMedication({
+    required String patientId,
+    required String genericName,
+    required double dosageAmount,
+    required String dosageUnit,
+    String? excludeMedicationId,
+  }) async {
+    final safePatientId = patientId.trim();
+    final normalizedGeneric = genericName.trim().toLowerCase();
+
+    if (safePatientId.isEmpty) {
+      throw Exception('Patient ID is required');
+    }
+
+    final data = await supabase
+        .from('medications')
+        .select()
+        .eq('patient_id', safePatientId)
+        .eq('dosage_amount', dosageAmount)
+        .eq('dosage_unit', dosageUnit)
+        .eq('is_active', true);
+
+    final matches = (data as List)
+        .map(
+          (row) => Medication.fromJson(
+        Map<String, dynamic>.from(row as Map),
+      ),
+    )
+        .where((med) {
+      if (excludeMedicationId != null && med.id == excludeMedicationId) {
+        return false;
+      }
+      return med.genericName.trim().toLowerCase() == normalizedGeneric;
+    })
+        .toList();
+
+    return matches.isEmpty ? null : matches.first;
+  }
+
+  Future<Medication> updateMedicationFull({
+    required String id,
+    required String patientId,
+    required String genericName,
+    String? brandName,
+    required double dosageAmount,
+    required String dosageUnit,
+    required String medicationType,
+    int? currentQuantity,
+    int refillAlertAt = 7,
+    String? pillColor,
+    String? pillShape,
+    String? pillImageUrl,
+    String? notes,
+  }) async {
+    final safePatientId = patientId.trim();
+
+    if (safePatientId.isEmpty) {
+      throw Exception('Patient ID is required');
+    }
+
+    final data = await supabase
+        .from('medications')
+        .update(<String, dynamic>{
+      'patient_id': safePatientId,
+      'generic_name': genericName.trim(),
+      'brand_name':
+      brandName?.trim().isEmpty == true ? null : brandName?.trim(),
+      'dosage_amount': dosageAmount,
+      'dosage_unit': dosageUnit,
+      'medication_type': medicationType,
+      'current_quantity': currentQuantity,
+      'refill_alert_at': refillAlertAt,
+      'pill_color': pillColor,
+      'pill_shape': pillShape,
+      'pill_image_url': pillImageUrl,
+      'notes': notes?.trim().isEmpty == true ? null : notes?.trim(),
+      'updated_at': DateTime.now().toIso8601String(),
+    })
+        .eq('id', id)
+        .eq('patient_id', safePatientId)
+        .select()
+        .single();
+
+    return Medication.fromJson(data);
+  }
+
+  // In medication_service.dart
+  Future<Medication?> getMedicationByName(String name) async {
+    try {
+      final response = await supabase
+          .from('medications')
+          .select()
+          .eq('generic_name', name)
+          .maybeSingle();
+
+      if (response == null) return null;
+      return Medication.fromJson(response);
+    } catch (e) {
+      debugPrint('❌ Error getting medication by name: $e');
+      return null;
+    }
   }
 }

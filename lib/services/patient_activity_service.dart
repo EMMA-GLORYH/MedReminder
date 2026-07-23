@@ -3,6 +3,7 @@
 import 'package:flutter/foundation.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 
+import '../main.dart';
 import '../models/patient_activity.dart';
 
 class PatientActivityService {
@@ -97,66 +98,220 @@ class PatientActivityService {
     }
   }
 
-  /// Get activity statistics for dashboard
   Future<Map<String, int>> getActivityStats({
     required String caregiverId,
     String? patientId,
   }) async {
+    final safeCaregiverId = caregiverId.trim();
+    final filteredPatientId = patientId?.trim();
+
+    if (safeCaregiverId.isEmpty) {
+      throw ArgumentError.value(
+        caregiverId,
+        'caregiverId',
+        'Caregiver ID cannot be empty',
+      );
+    }
+
+    final now = DateTime.now();
+    final startOfDay = DateTime(now.year, now.month, now.day);
+    final endOfDayExclusive = startOfDay.add(const Duration(days: 1));
+    final todayString = startOfDay.toIso8601String().split('T').first;
+    final weekdayIndex = now.weekday % 7;
+
     try {
-      debugPrint(
-        '📊 Fetching stats: caregiver=$caregiverId, patient=$patientId',
-      );
+      final relationships = await supabase
+          .from('care_relationships')
+          .select('patient_id, can_view_logs, can_view_medications')
+          .eq('caregiver_id', safeCaregiverId)
+          .eq('status', 'active');
 
-      final response = await _supabase.rpc(
-        'get_caretaker_activity_stats',
-        params: {
-          'p_caregiver_id': caregiverId,
-          'p_patient_id': patientId,
-        },
-      );
+      final logPatientIds = <String>[];
+      final schedulePatientIds = <String>[];
 
-      debugPrint('✅ Stats response: $response');
+      for (final raw in relationships as List) {
+        final row = Map<String, dynamic>.from(raw as Map);
+        final relPatientId = row['patient_id']?.toString();
 
-      // Response is a list with a single row
-      if (response is List && response.isNotEmpty) {
-        final row = response[0] as Map<String, dynamic>;
+        if (relPatientId == null || relPatientId.trim().isEmpty) continue;
+        if (filteredPatientId != null &&
+            filteredPatientId.isNotEmpty &&
+            relPatientId != filteredPatientId) {
+          continue;
+        }
 
-        return {
-          'total': (row['total'] as num?)?.toInt() ?? 0,
-          'taken': (row['taken'] as num?)?.toInt() ?? 0,
-          'missed': (row['missed'] as num?)?.toInt() ?? 0,
-          'pending': (row['pending'] as num?)?.toInt() ?? 0,
-          'skipped': (row['skipped'] as num?)?.toInt() ?? 0,
-        };
+        if (row['can_view_logs'] == true) {
+          logPatientIds.add(relPatientId);
+        }
+
+        if (row['can_view_medications'] == true) {
+          schedulePatientIds.add(relPatientId);
+        }
       }
 
-      return {
-        'total': 0,
-        'taken': 0,
-        'missed': 0,
-        'pending': 0,
-        'skipped': 0,
-      };
-    } on PostgrestException catch (error) {
-      debugPrint('❌ Stats Postgrest error: ${error.message}');
-      return {
-        'total': 0,
-        'taken': 0,
-        'missed': 0,
-        'pending': 0,
-        'skipped': 0,
+      final takenKeys = <String>{};
+      final explicitMissedKeys = <String>{};
+      final skippedKeys = <String>{};
+
+      // ✅ Count completed/taken doses from actual logs
+      if (logPatientIds.isNotEmpty) {
+        final logRows = await supabase
+            .from('dose_logs')
+            .select('patient_id, medication_id, scheduled_for, status')
+            .inFilter('patient_id', logPatientIds)
+            .gte('scheduled_for', startOfDay.toIso8601String())
+            .lt('scheduled_for', endOfDayExclusive.toIso8601String());
+
+        for (final raw in logRows as List) {
+          final row = Map<String, dynamic>.from(raw as Map);
+
+          final logPatientId = row['patient_id']?.toString();
+          final medicationId = row['medication_id']?.toString();
+          final scheduledForRaw = row['scheduled_for']?.toString();
+          final status = row['status']?.toString().toLowerCase().trim() ?? '';
+
+          if (logPatientId == null ||
+              medicationId == null ||
+              scheduledForRaw == null) {
+            continue;
+          }
+
+          final scheduledFor = DateTime.tryParse(scheduledForRaw)?.toLocal();
+          if (scheduledFor == null) continue;
+
+          final key = _buildDoseKey(
+            patientId: logPatientId,
+            medicationId: medicationId,
+            scheduledFor: scheduledFor,
+          );
+
+          if (status == 'taken' || status == 'late') {
+            takenKeys.add(key);
+          } else if (status == 'missed') {
+            explicitMissedKeys.add(key);
+          } else if (status == 'skipped') {
+            skippedKeys.add(key);
+          }
+        }
+      }
+
+      int pendingCount = 0;
+      int inferredMissedCount = 0;
+
+      // ✅ Count pending + inferred missed from today's schedules
+      if (schedulePatientIds.isNotEmpty) {
+        final scheduleRows = await supabase
+            .from('medication_schedules')
+            .select('''
+            id,
+            patient_id,
+            medication_id,
+            frequency_type,
+            scheduled_times,
+            scheduled_days,
+            start_date,
+            end_date,
+            is_active
+          ''')
+            .inFilter('patient_id', schedulePatientIds)
+            .eq('is_active', true)
+            .lte('start_date', todayString)
+            .or('end_date.is.null,end_date.gte.$todayString');
+
+        final expectedKeys = <String>{};
+
+        for (final raw in scheduleRows as List) {
+          final row = Map<String, dynamic>.from(raw as Map);
+
+          final schedulePatientId = row['patient_id']?.toString();
+          final medicationId = row['medication_id']?.toString();
+          final frequencyType =
+              row['frequency_type']?.toString().toLowerCase().trim() ?? '';
+
+          if (schedulePatientId == null || medicationId == null) continue;
+          if (frequencyType == 'as_needed') continue;
+
+          final scheduledDays = row['scheduled_days'] as List?;
+          if (scheduledDays != null &&
+              scheduledDays.isNotEmpty &&
+              !scheduledDays.contains(weekdayIndex)) {
+            continue;
+          }
+
+          final scheduledTimes = row['scheduled_times'] as List?;
+          if (scheduledTimes == null || scheduledTimes.isEmpty) continue;
+
+          for (final rawTime in scheduledTimes) {
+            final time = rawTime.toString();
+            final parts = time.split(':');
+            if (parts.length < 2) continue;
+
+            final hour = int.tryParse(parts[0]);
+            final minute = int.tryParse(parts[1]);
+
+            if (hour == null || minute == null) continue;
+
+            final scheduledFor = DateTime(
+              startOfDay.year,
+              startOfDay.month,
+              startOfDay.day,
+              hour,
+              minute,
+            );
+
+            final key = _buildDoseKey(
+              patientId: schedulePatientId,
+              medicationId: medicationId,
+              scheduledFor: scheduledFor,
+            );
+
+            if (!expectedKeys.add(key)) continue;
+
+            // Already completed
+            if (takenKeys.contains(key)) continue;
+
+            // Explicitly skipped should not be counted anymore
+            if (skippedKeys.contains(key)) continue;
+
+            // Explicitly missed from logs
+            if (explicitMissedKeys.contains(key)) continue;
+
+            if (scheduledFor.isBefore(now)) {
+              inferredMissedCount++;
+            } else {
+              // ✅ upcoming dose counts as pending
+              pendingCount++;
+            }
+          }
+        }
+      }
+
+      return <String, int>{
+        'taken': takenKeys.length,
+        'missed': explicitMissedKeys.length + inferredMissedCount,
+        'pending': pendingCount,
       };
     } catch (error, stack) {
-      debugPrint('❌ Failed to load activity stats: $error');
+      debugPrint('❌ Failed to compute activity stats: $error');
       debugPrint('$stack');
-      return {
-        'total': 0,
-        'taken': 0,
-        'missed': 0,
-        'pending': 0,
-        'skipped': 0,
-      };
+      rethrow;
     }
+  }
+
+  String _buildDoseKey({
+    required String patientId,
+    required String medicationId,
+    required DateTime scheduledFor,
+  }) {
+    final local = scheduledFor.toLocal();
+
+    final y = local.year.toString().padLeft(4, '0');
+    final m = local.month.toString().padLeft(2, '0');
+    final d = local.day.toString().padLeft(2, '0');
+    final h = local.hour.toString().padLeft(2, '0');
+    final min = local.minute.toString().padLeft(2, '0');
+
+    return '$patientId|$medicationId|$y-$m-$d $h:$min';
   }
 
   /// Get unique patients with recent activity

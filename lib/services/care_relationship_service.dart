@@ -17,7 +17,7 @@ class CareRelationshipService {
     required String caretakerEmail,
     String? relationship,
     bool canEditMedications = false,
-    int  alertThresholdMins = 30,
+    int alertThresholdMins = 30,
   }) async {
     final patientId = AuthService.instance.currentUser?.id;
     if (patientId == null) throw Exception('Not logged in');
@@ -50,7 +50,7 @@ class CareRelationshipService {
     final existing = await supabase
         .from('care_relationships')
         .select('id, status')
-        .eq('patient_id',   patientId)
+        .eq('patient_id', patientId)
         .eq('caregiver_id', caretakerId)
         .maybeSingle();
 
@@ -67,9 +67,7 @@ class CareRelationshipService {
         throw Exception('An invite is already pending for this person.');
       }
       if (s == 'revoked') {
-        debugPrint(
-          '🔄 Re-inviting previously revoked caretaker',
-        );
+        debugPrint('🔄 Re-inviting previously revoked caretaker');
 
         final now = DateTime.now().toUtc().toIso8601String();
 
@@ -78,13 +76,10 @@ class CareRelationshipService {
             .update({
           'status': 'pending',
           'relationship': relationship,
-
-          // Restore the standard permissions for the new invitation.
           'can_view_logs': true,
           'can_view_medications': true,
           'can_receive_alerts': true,
           'can_edit_medications': canEditMedications,
-
           'alert_threshold_mins': alertThresholdMins,
           'invited_at': now,
           'accepted_at': null,
@@ -101,12 +96,8 @@ class CareRelationshipService {
           );
         }
 
-        debugPrint(
-          '✅ Revoked relationship restored to pending: ${updated['id']}',
-        );
-
+        debugPrint('✅ Revoked relationship restored to pending: ${updated['id']}');
         await _sendInviteEmail(updated['id'] as String);
-
         return CareRelationship.fromJson(updated);
       }
     }
@@ -121,15 +112,15 @@ class CareRelationshipService {
       final data = await supabase
           .from('care_relationships')
           .insert({
-        'patient_id':           patientId,
-        'caregiver_id':         caretakerId,
-        'relationship':         relationship,
-        'can_view_logs':        true,
+        'patient_id': patientId,
+        'caregiver_id': caretakerId,
+        'relationship': relationship,
+        'can_view_logs': true,
         'can_view_medications': true,
-        'can_receive_alerts':   true,
+        'can_receive_alerts': true,
         'can_edit_medications': canEditMedications,
         'alert_threshold_mins': alertThresholdMins,
-        'status':               'pending',
+        'status': 'pending',
       })
           .select()
           .single();
@@ -182,9 +173,9 @@ class CareRelationshipService {
     final row = await supabase
         .from('care_relationships')
         .select('id, status')
-        .eq('id',         relationshipId)
+        .eq('id', relationshipId)
         .eq('patient_id', patientId)
-        .eq('status',     'pending')
+        .eq('status', 'pending')
         .maybeSingle();
 
     if (row == null) {
@@ -227,7 +218,7 @@ class CareRelationshipService {
     await supabase
         .from('care_relationships')
         .update({'status': 'revoked'})
-        .eq('id',         relationshipId)
+        .eq('id', relationshipId)
         .eq('patient_id', patientId);
 
     debugPrint('🗑️ Caretaker revoked: $relationshipId');
@@ -239,12 +230,12 @@ class CareRelationshipService {
     bool? canViewMedications,
     bool? canReceiveAlerts,
     bool? canEditMedications,
-    int?  alertThresholdMins,
+    int? alertThresholdMins,
   }) async {
     final updates = <String, dynamic>{};
-    if (canViewLogs        != null) updates['can_view_logs']        = canViewLogs;
+    if (canViewLogs != null) updates['can_view_logs'] = canViewLogs;
     if (canViewMedications != null) updates['can_view_medications'] = canViewMedications;
-    if (canReceiveAlerts   != null) updates['can_receive_alerts']   = canReceiveAlerts;
+    if (canReceiveAlerts != null) updates['can_receive_alerts'] = canReceiveAlerts;
     if (canEditMedications != null) updates['can_edit_medications'] = canEditMedications;
     if (alertThresholdMins != null) updates['alert_threshold_mins'] = alertThresholdMins;
 
@@ -259,13 +250,28 @@ class CareRelationshipService {
   }
 
   // ══════════════════════════════════════════════════════════════
+  // CARETAKER SIDE — Disconnect from patient (Soft Revoke)
+  // ══════════════════════════════════════════════════════════════
+
+  /// Sets status to 'revoked'. Preserves all patient medications, schedules, and dose logs.
+  Future<void> disconnectPatient(String relationshipId) async {
+    final caregiverId = AuthService.instance.currentUser?.id;
+    if (caregiverId == null) throw Exception('Not logged in');
+
+    await supabase
+        .from('care_relationships')
+        .update({'status': 'revoked'})
+        .eq('id', relationshipId)
+        .eq('caregiver_id', caregiverId);
+
+    debugPrint('🔌 Caretaker disconnected from relationship: $relationshipId');
+  }
+
+  // ══════════════════════════════════════════════════════════════
   // CARETAKER SIDE — Pending invites inbox
   // ══════════════════════════════════════════════════════════════
 
   /// Fetch ALL pending invites for the current caretaker in one shot.
-  /// Kept unchanged for any existing callers that need a complete list.
-  /// For the Pending Invites screen itself, prefer [getPendingInvitesPage]
-  /// so the UI never has to render an unbounded number of cards at once.
   Future<List<CareRelationship>> getPendingInvites() async {
     final caregiverId = AuthService.instance.currentUser?.id;
     if (caregiverId == null) throw Exception('Not logged in');
@@ -289,10 +295,7 @@ class CareRelationshipService {
     }).toList();
   }
 
-  /// Fetch one indexed page of pending invites, most recently invited
-  /// first. Backed by Postgres `.range()`, so only the requested rows are
-  /// ever transferred or rendered — e.g. offset: 0, limit: 10 gets
-  /// invites 0..9; offset: 10, limit: 10 gets invites 10..19.
+  /// Fetch one indexed page of pending invites
   Future<List<CareRelationship>> getPendingInvitesPage({
     required int offset,
     required int limit,
@@ -322,9 +325,7 @@ class CareRelationshipService {
     }).toList();
   }
 
-  /// Lightweight count of pending invites, without transferring any row
-  /// data — used for the badge count in the AppBar / dashboard even
-  /// though the list itself is paginated.
+  /// Lightweight count of pending invites
   Future<int> getPendingInviteCount() async {
     final caregiverId = AuthService.instance.currentUser?.id;
     if (caregiverId == null) return 0;
@@ -342,11 +343,8 @@ class CareRelationshipService {
   }
 
   /// Accept — updates status to 'active' and stamps accepted_at
-  Future<CareRelationship> acceptInvite(
-      String relationshipId,
-      ) async {
-    final caregiverId =
-        AuthService.instance.currentUser?.id;
+  Future<CareRelationship> acceptInvite(String relationshipId) async {
+    final caregiverId = AuthService.instance.currentUser?.id;
 
     if (caregiverId == null) {
       throw Exception('Not logged in');
@@ -361,8 +359,6 @@ class CareRelationshipService {
         .update({
       'status': 'active',
       'accepted_at': now,
-
-      // Every newly accepted invitation can receive SOS alerts.
       'can_receive_alerts': true,
     })
         .eq('id', relationshipId)
@@ -377,9 +373,7 @@ class CareRelationshipService {
       );
     }
 
-    debugPrint(
-      '✅ Invite accepted: ${data['id']}, status: ${data['status']}',
-    );
+    debugPrint('✅ Invite accepted: ${data['id']}, status: ${data['status']}');
 
     return CareRelationship.fromJson(data);
   }
@@ -392,9 +386,9 @@ class CareRelationshipService {
     await supabase
         .from('care_relationships')
         .update({'status': 'revoked'})
-        .eq('id',           relationshipId)
+        .eq('id', relationshipId)
         .eq('caregiver_id', caregiverId)
-        .eq('status',       'pending');
+        .eq('status', 'pending');
 
     debugPrint('❌ Invite declined: $relationshipId');
   }
@@ -422,9 +416,7 @@ class CareRelationshipService {
     }).toList();
   }
 
-  /// Fetch one indexed page of active patients this caretaker monitors,
-  /// most recently accepted first. Backed by Postgres `.range()`, so only
-  /// the requested rows are ever transferred or rendered.
+  /// Fetch one indexed page of active patients this caretaker monitors
   Future<List<CareRelationship>> getPatientsIMonitorPage({
     required int offset,
     required int limit,
@@ -454,9 +446,7 @@ class CareRelationshipService {
     }).toList();
   }
 
-  /// Lightweight count of active patients, without transferring any row
-  /// data — used to show an accurate total even though the list itself
-  /// is paginated.
+  /// Lightweight count of active patients
   Future<int> getActivePatientCount() async {
     final caregiverId = AuthService.instance.currentUser?.id;
     if (caregiverId == null) return 0;
@@ -476,15 +466,10 @@ class CareRelationshipService {
   // ══════════════════════════════════════════════════════════════
   // REALTIME — live invite updates for caretaker
   // ══════════════════════════════════════════════════════════════
-  RealtimeChannel subscribeToMyInvites(
-      void Function() onChanged,
-      ) {
-    final caregiverId =
-        AuthService.instance.currentUser?.id;
+  RealtimeChannel subscribeToMyInvites(void Function() onChanged) {
+    final caregiverId = AuthService.instance.currentUser?.id;
 
-    final channel = supabase.channel(
-      'care_invites_${caregiverId ?? 'anon'}',
-    );
+    final channel = supabase.channel('care_invites_${caregiverId ?? 'anon'}');
 
     if (caregiverId == null) {
       return channel;
@@ -507,15 +492,10 @@ class CareRelationshipService {
     return channel;
   }
 
-  RealtimeChannel subscribeToMyCaretakers(
-      void Function() onChanged,
-      ) {
-    final patientId =
-        AuthService.instance.currentUser?.id;
+  RealtimeChannel subscribeToMyCaretakers(void Function() onChanged) {
+    final patientId = AuthService.instance.currentUser?.id;
 
-    final channel = supabase.channel(
-      'patient_caretakers_${patientId ?? 'anon'}',
-    );
+    final channel = supabase.channel('patient_caretakers_${patientId ?? 'anon'}');
 
     if (patientId == null) {
       return channel;
@@ -538,9 +518,9 @@ class CareRelationshipService {
     return channel;
   }
 
-// ══════════════════════════════════════════════════════════════
-// SOS SUPPORT
-// ══════════════════════════════════════════════════════════════
+  // ══════════════════════════════════════════════════════════════
+  // SOS SUPPORT
+  // ══════════════════════════════════════════════════════════════
 
   /// Returns active caregivers who are allowed to receive SOS alerts.
   Future<List<Map<String, dynamic>>> getActiveAlertCaretakers() async {
@@ -616,13 +596,10 @@ class CareRelationshipService {
 
   /// Realtime relationship changes for patient or caregiver screens.
   RealtimeChannel subscribeToCareRelationships(
-      void Function(PostgresChangePayload payload) onChanged,
-      ) {
+      void Function(PostgresChangePayload payload) onChanged) {
     final userId = AuthService.instance.currentUser?.id;
 
-    final channel = supabase.channel(
-      'care_relationships_realtime_${userId ?? 'anon'}',
-    );
+    final channel = supabase.channel('care_relationships_realtime_${userId ?? 'anon'}');
 
     channel
         .onPostgresChanges(
@@ -653,11 +630,8 @@ class CareRelationshipService {
   // CARETAKER PATIENT ACCESS
   // ══════════════════════════════════════════════════════════════
 
-  Future<CareRelationship?> getPatientRelationship(
-      String patientId,
-      ) async {
-    final caregiverId =
-        AuthService.instance.currentUser?.id;
+  Future<CareRelationship?> getPatientRelationship(String patientId) async {
+    final caregiverId = AuthService.instance.currentUser?.id;
 
     if (caregiverId == null) {
       throw Exception('Not logged in');
@@ -680,30 +654,18 @@ class CareRelationshipService {
     );
   }
 
-  Future<bool> canViewPatientLogs(
-      String patientId,
-      ) async {
-    final relationship =
-    await getPatientRelationship(patientId);
-
+  Future<bool> canViewPatientLogs(String patientId) async {
+    final relationship = await getPatientRelationship(patientId);
     return relationship?.canViewLogs == true;
   }
 
-  Future<bool> canViewPatientMedications(
-      String patientId,
-      ) async {
-    final relationship =
-    await getPatientRelationship(patientId);
-
+  Future<bool> canViewPatientMedications(String patientId) async {
+    final relationship = await getPatientRelationship(patientId);
     return relationship?.canViewMedications == true;
   }
 
-  Future<bool> canReceivePatientAlerts(
-      String patientId,
-      ) async {
-    final relationship =
-    await getPatientRelationship(patientId);
-
+  Future<bool> canReceivePatientAlerts(String patientId) async {
+    final relationship = await getPatientRelationship(patientId);
     return relationship?.canReceiveAlerts == true;
   }
 
@@ -712,7 +674,6 @@ class CareRelationshipService {
   // ══════════════════════════════════════════════════════════════
 
   /// Check if current caretaker can edit medications for a patient.
-  /// Used by CaretakerAddMedicationScreen and CaretakerAddScheduleScreen.
   Future<bool> canEditMedications(String patientId) async {
     try {
       final caregiverId = AuthService.instance.currentUser?.id;
@@ -736,13 +697,11 @@ class CareRelationshipService {
   }
 
   /// Check if current caretaker can view medications for a patient.
-  /// Alias for canViewPatientMedications for consistency.
   Future<bool> canViewMedications(String patientId) async {
     return await canViewPatientMedications(patientId);
   }
 
   /// Get the full care relationship for current user and patient.
-  /// Returns null if no active relationship exists.
   Future<CareRelationship?> getRelationship(String patientId) async {
     return await getPatientRelationship(patientId);
   }

@@ -4,6 +4,7 @@ package com.example.mar
 
 import android.Manifest
 import android.app.AlarmManager
+import android.app.ForegroundServiceStartNotAllowedException
 import android.app.PendingIntent
 import android.content.Context
 import android.content.Intent
@@ -19,6 +20,7 @@ import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.plugin.common.MethodCall
 import io.flutter.plugin.common.MethodChannel
 import kotlin.math.absoluteValue
+
 
 class MainActivity : FlutterActivity() {
 
@@ -100,6 +102,12 @@ class MainActivity : FlutterActivity() {
                 "Stored initial scanner payload until Flutter is ready"
             )
         }
+
+        /*
+         * Flutter route channel is now registered. If Android opened the
+         * activity with a scanner payload, send it to Flutter immediately.
+         */
+        dispatchPendingScannerPayload()
     }
 
     override fun onNewIntent(
@@ -1327,35 +1335,21 @@ class MainActivity : FlutterActivity() {
         vibrationMode: String,
         ttsRepeatCount: Int
     ) {
-        val serviceIntent =
-            Intent(
-                this,
-                TtsSpeakService::class.java
-            ).apply {
-                action =
-                    TtsSpeakService.ACTION_START
+        val serviceIntent = Intent(
+            this,
+            TtsSpeakService::class.java,
+        ).apply {
+            action = TtsSpeakService.ACTION_START
 
-                putExtra("message", message)
-                putExtra("payload", payload)
-                putExtra("alertMode", alertMode)
-                putExtra(
-                    "soundResource",
-                    soundResource
-                )
-                putExtra("loopSound", loopSound)
-                putExtra(
-                    "launchScanner",
-                    launchScanner
-                )
-                putExtra(
-                    "vibrationMode",
-                    vibrationMode
-                )
-                putExtra(
-                    "ttsRepeatCount",
-                    ttsRepeatCount
-                )
-            }
+            putExtra("message", message)
+            putExtra("payload", payload)
+            putExtra("alertMode", alertMode)
+            putExtra("soundResource", soundResource)
+            putExtra("loopSound", loopSound)
+            putExtra("launchScanner", launchScanner)
+            putExtra("vibrationMode", vibrationMode)
+            putExtra("ttsRepeatCount", ttsRepeatCount)
+        }
 
         Log.d(
             LOG_TAG,
@@ -1365,15 +1359,42 @@ class MainActivity : FlutterActivity() {
                     "loop=$loopSound, " +
                     "scanner=$launchScanner, " +
                     "vibration=$vibrationMode, " +
-                    "ttsRepeats=$ttsRepeatCount"
+                    "ttsRepeats=$ttsRepeatCount",
         )
 
-        if (Build.VERSION.SDK_INT >=
-            Build.VERSION_CODES.O
-        ) {
-            startForegroundService(serviceIntent)
-        } else {
-            startService(serviceIntent)
+        try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                ContextCompat.startForegroundService(this, serviceIntent)
+            } else {
+                startService(serviceIntent)
+            }
+        } catch (error: ForegroundServiceStartNotAllowedException) {
+            /*
+             * Android 12+ may block a foreground-service start in some background
+             * situations. Log it instead of allowing the entire app process to
+             * crash.
+             */
+            Log.e(
+                LOG_TAG,
+                "Android blocked foreground medication alert start",
+                error,
+            )
+        } catch (error: SecurityException) {
+            /*
+             * Covers missing service permissions or invalid service type.
+             * This must not crash MainActivity / Flutter.
+             */
+            Log.e(
+                LOG_TAG,
+                "Security exception while starting medication alert service",
+                error,
+            )
+        } catch (error: Exception) {
+            Log.e(
+                LOG_TAG,
+                "Could not start medication alert service",
+                error,
+            )
         }
     }
 

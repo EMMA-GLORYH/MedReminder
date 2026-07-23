@@ -3,9 +3,11 @@
 import 'dart:typed_data';
 import 'package:flutter/material.dart';
 import 'package:image_picker/image_picker.dart';
+import 'package:supabase_flutter/supabase_flutter.dart';
 
 import '../../services/local_cache_service.dart';
 import '../../services/medication_service.dart';
+import '../../services/auth_service.dart';
 import '../../theme/app_colors.dart';
 import '../../theme/app_text_styles.dart';
 import '../../widgets/buttons/app_button.dart';
@@ -22,6 +24,7 @@ class AddMedicationScreen extends StatefulWidget {
 
 class _AddMedicationScreenState extends State<AddMedicationScreen> {
   final _formKey = GlobalKey<FormState>();
+  final _authService = AuthService.instance;
 
   // Text controllers
   final _genericNameCtrl = TextEditingController();
@@ -44,6 +47,17 @@ class _AddMedicationScreenState extends State<AddMedicationScreen> {
   bool _isSaving = false;
   bool _submitted = false;
   bool _anySaved = false;
+  bool _isCheckingName = false;
+  bool _isDuplicate = false;
+
+  // Store medication name for use in catch block
+  String _currentMedicationName = '';
+
+  // Store user data
+  User? _currentUser;
+  String? _patientId;
+  String? _patientName;
+  String? _currentUserRole;
 
   // Generate temp ID for pending medications
   final String _tempId = 'temp_${DateTime.now().millisecondsSinceEpoch}';
@@ -68,7 +82,121 @@ class _AddMedicationScreenState extends State<AddMedicationScreen> {
   bool get _showShapeError => _submitted && _pillShape == null;
 
   @override
+  void initState() {
+    super.initState();
+    debugPrint('=' * 60);
+    debugPrint('🚀 AddMedicationScreen - INIT');
+    debugPrint('=' * 60);
+    _initializeScreen();
+  }
+
+  Future<void> _initializeScreen() async {
+    try {
+      debugPrint('📋 Step 1: Initializing screen...');
+      await _loadPatientContext();
+      debugPrint('📋 Step 1 Complete: Screen initialized');
+    } catch (e) {
+      debugPrint('❌ Error initializing screen: $e');
+    }
+  }
+
+  Future<void> _loadPatientContext() async {
+    try {
+      debugPrint('\n🔍 Step 2: Loading patient context...');
+
+      // Get current user using the existing getter
+      debugPrint('  -> Getting current user...');
+      _currentUser = _authService.currentUser;
+
+      if (_currentUser == null) {
+        debugPrint('❌ No user logged in - cannot proceed');
+        if (mounted) {
+          AppSnackbar.error(context, 'Please log in to add medication');
+        }
+        return;
+      }
+
+      debugPrint('  ✅ Current user found:');
+      debugPrint('     - ID: ${_currentUser!.id}');
+      debugPrint('     - Email: ${_currentUser!.email}');
+
+      // Get user role from user metadata
+      _currentUserRole = _currentUser!.userMetadata?['role'] as String?;
+      debugPrint('     - Role: $_currentUserRole');
+      debugPrint('     - All metadata: ${_currentUser!.userMetadata}');
+
+      // If role is null, try to get from profile
+      if (_currentUserRole == null) {
+        debugPrint('  -> Role not in metadata, trying getCurrentProfile()...');
+        try {
+          final profile = await _authService.getCurrentProfile();
+          _currentUserRole = profile?.role;
+          debugPrint('     - Profile role: $_currentUserRole');
+        } catch (e) {
+          debugPrint('  ⚠️ Could not get profile: $e');
+        }
+      }
+
+      // If the user is a caretaker, we need to get the selected patient
+      if (_currentUserRole == 'caretaker') {
+        debugPrint('\n  👤 User is a CARETAKER');
+        debugPrint('  -> Looking for selected patient...');
+
+        // Get selected patient from arguments
+        final args = ModalRoute.of(context)?.settings.arguments;
+        debugPrint('  -> Route arguments: $args');
+
+        if (args is Map<String, dynamic>) {
+          _patientId = args['patientId'] as String?;
+          _patientName = args['patientName'] as String?;
+          debugPrint('  ✅ Extracted from arguments:');
+          debugPrint('     - Patient ID: $_patientId');
+          debugPrint('     - Patient Name: $_patientName');
+        }
+
+        // If we still don't have a patient ID
+        if (_patientId == null) {
+          debugPrint('  ⚠️ No patient in arguments');
+          debugPrint('  💡 Need to pass patientId as route arguments');
+
+          if (mounted) {
+            AppSnackbar.error(context, 'Please select a patient first from the patient list');
+          }
+          return;
+        }
+
+        debugPrint('  ✅ Caretaker setup complete');
+      } else if (_currentUserRole == 'patient' || _currentUserRole == null) {
+        // Patient is adding for themselves (or role unknown, default to patient)
+        _patientId = _currentUser!.id;
+        _patientName = _currentUser!.userMetadata?['full_name'] as String?;
+        debugPrint('  ✅ Patient adding for themselves:');
+        debugPrint('     - Patient ID: $_patientId');
+        debugPrint('     - Patient Name: $_patientName');
+      } else {
+        debugPrint('  ⚠️ Unknown user role: $_currentUserRole');
+        if (mounted) {
+          AppSnackbar.error(context, 'Unknown user role. Please contact support.');
+        }
+        return;
+      }
+
+      debugPrint('\n✅ Step 2 Complete: Patient context loaded successfully');
+      debugPrint('   Final values:');
+      debugPrint('   - Current User ID: ${_currentUser!.id}');
+      debugPrint('   - Current User Role: $_currentUserRole');
+      debugPrint('   - Patient ID: $_patientId');
+      debugPrint('   - Patient Name: $_patientName');
+
+    } catch (e, stack) {
+      debugPrint('❌ Step 2 Failed: Error loading patient context: $e');
+      debugPrint('   Stack trace: $stack');
+    }
+  }
+
+  @override
   void dispose() {
+    debugPrint('🧹 AddMedicationScreen - DISPOSE');
     _genericNameCtrl.dispose();
     _brandNameCtrl.dispose();
     _dosageAmountCtrl.dispose();
@@ -78,6 +206,7 @@ class _AddMedicationScreenState extends State<AddMedicationScreen> {
   }
 
   void _resetForm() {
+    debugPrint('🔄 Resetting form');
     _formKey.currentState?.reset();
     _genericNameCtrl.clear();
     _brandNameCtrl.clear();
@@ -94,10 +223,47 @@ class _AddMedicationScreenState extends State<AddMedicationScreen> {
       _selectedImageBytes = null;
       _isSaving = false;
       _submitted = false;
+      _isCheckingName = false;
+      _isDuplicate = false;
+      _currentMedicationName = '';
     });
+    debugPrint('✅ Form reset complete');
+  }
+
+  /// Check if medication name already exists using direct database query
+  Future<Map<String, dynamic>> _checkDuplicateInDatabase(String name) async {
+    debugPrint('\n🔍 Step 4: Checking for duplicate medication...');
+    try {
+      debugPrint('  -> Checking name: "$name"');
+      final existingMedication = await MedicationService.instance.getMedicationByName(
+        name.trim(),
+      );
+
+      if (existingMedication != null) {
+        debugPrint('  ⚠️ DUPLICATE FOUND: "$name" already exists');
+        debugPrint('  -> Existing medication ID: ${existingMedication.id}');
+        return {
+          'isDuplicate': true,
+          'existingMedication': existingMedication,
+        };
+      }
+
+      debugPrint('  ✅ No duplicate found for: "$name"');
+      return {
+        'isDuplicate': false,
+        'existingMedication': null,
+      };
+    } catch (e) {
+      debugPrint('  ❌ Error checking duplicate: $e');
+      return {
+        'isDuplicate': false,
+        'error': e.toString(),
+      };
+    }
   }
 
   Future<void> _pickMedicationImage() async {
+    debugPrint('\n📸 Step: Picking medication image...');
     try {
       final image = await _picker.pickImage(
         source: ImageSource.camera,
@@ -107,8 +273,14 @@ class _AddMedicationScreenState extends State<AddMedicationScreen> {
         preferredCameraDevice: CameraDevice.rear,
       );
 
-      if (image == null) return;
+      if (image == null) {
+        debugPrint('  ⚠️ User cancelled image picker');
+        return;
+      }
+
+      debugPrint('  ✅ Image selected: ${image.name}');
       final bytes = await image.readAsBytes();
+      debugPrint('  ✅ Image bytes loaded: ${bytes.length} bytes');
 
       if (!mounted) return;
       setState(() {
@@ -116,74 +288,236 @@ class _AddMedicationScreenState extends State<AddMedicationScreen> {
         _selectedImageBytes = bytes;
       });
 
-      AppSnackbar.success(context, 'Medicine image added');
+      debugPrint('  ✅ Image state updated');
+      AppSnackbar.success(context, '✅ Medicine photo captured successfully');
     } catch (e) {
+      debugPrint('  ❌ Camera error: $e');
       if (!mounted) return;
-      AppSnackbar.error(context, 'Could not open camera. Please try again.');
+      AppSnackbar.error(context, '📷 Camera access issue. Please make sure camera permissions are enabled.');
     }
   }
 
   /// Save medication FIRST, then navigate to schedule
   Future<void> _saveMedication() async {
+    debugPrint('\n' + '=' * 60);
+    debugPrint('🎯 STEP 3: STARTING MEDICATION SAVE PROCESS');
+    debugPrint('=' * 60);
+
     setState(() {
       _submitted = true;
       _isSaving = true;
+      _isCheckingName = true;
+      _isDuplicate = false;
     });
 
+    // STEP 3.1: Validate form
+    debugPrint('\n📋 Step 3.1: Validating form...');
     final formValid = _formKey.currentState?.validate() ?? false;
+    debugPrint('  -> Form valid: $formValid');
 
     if (!formValid) {
-      setState(() => _isSaving = false);
+      debugPrint('❌ Form validation failed - stopping save');
+      setState(() {
+        _isSaving = false;
+        _isCheckingName = false;
+      });
       return;
     }
+
+    // STEP 3.2: Check image
+    debugPrint('\n📋 Step 3.2: Checking image...');
+    debugPrint('  -> Has image: $_hasImage');
 
     if (!_hasImage) {
-      AppSnackbar.error(context, 'Please add a medicine image');
-      setState(() => _isSaving = false);
+      debugPrint('❌ No image selected - stopping save');
+      AppSnackbar.error(context, '📸 Please take a photo of the medication first');
+      setState(() {
+        _isSaving = false;
+        _isCheckingName = false;
+      });
       return;
     }
+
+    // STEP 3.3: Check pill color
+    debugPrint('\n📋 Step 3.3: Checking pill color...');
+    debugPrint('  -> Pill color: $_pillColor');
 
     if (_pillColor == null) {
-      AppSnackbar.error(context, 'Please select pill color');
-      setState(() => _isSaving = false);
+      debugPrint('❌ No pill color selected - stopping save');
+      AppSnackbar.error(context, '🎨 Please select the pill color to help identify it later');
+      setState(() {
+        _isSaving = false;
+        _isCheckingName = false;
+      });
       return;
     }
+
+    // STEP 3.4: Check pill shape
+    debugPrint('\n📋 Step 3.4: Checking pill shape...');
+    debugPrint('  -> Pill shape: $_pillShape');
 
     if (_pillShape == null) {
-      AppSnackbar.error(context, 'Please select pill shape');
-      setState(() => _isSaving = false);
+      debugPrint('❌ No pill shape selected - stopping save');
+      AppSnackbar.error(context, '🔵 Please select the pill shape for easy identification');
+      setState(() {
+        _isSaving = false;
+        _isCheckingName = false;
+      });
       return;
     }
 
+    // STEP 3.5: Parse dosage
+    debugPrint('\n📋 Step 3.5: Parsing dosage...');
     final dosageText = _dosageAmountCtrl.text.trim();
     final dosageAmount = double.tryParse(dosageText);
+    debugPrint('  -> Dosage text: "$dosageText"');
+    debugPrint('  -> Parsed amount: $dosageAmount');
 
     if (dosageAmount == null || dosageAmount <= 0) {
-      AppSnackbar.error(context, 'Please enter a valid dosage amount');
-      setState(() => _isSaving = false);
+      debugPrint('❌ Invalid dosage amount - stopping save');
+      AppSnackbar.error(context, '💊 Please enter how much of this medication to take (e.g., 500)');
+      setState(() {
+        _isSaving = false;
+        _isCheckingName = false;
+      });
       return;
     }
 
+    // STEP 3.6: Parse quantity
+    debugPrint('\n📋 Step 3.6: Parsing quantity...');
     int? quantity;
     if (_quantityCtrl.text.trim().isNotEmpty) {
       quantity = int.tryParse(_quantityCtrl.text.trim());
+      debugPrint('  -> Quantity text: "${_quantityCtrl.text.trim()}"');
+      debugPrint('  -> Parsed quantity: $quantity');
+
       if (quantity == null || quantity < 0) {
-        AppSnackbar.error(context, 'Please enter a valid quantity');
-        setState(() => _isSaving = false);
+        debugPrint('❌ Invalid quantity - stopping save');
+        AppSnackbar.error(context, '📦 Please enter a valid number of pills/units you have');
+        setState(() {
+          _isSaving = false;
+          _isCheckingName = false;
+        });
         return;
       }
+    } else {
+      debugPrint('  -> Quantity not provided (optional)');
     }
 
-    try {
-      // 1. Upload image FIRST
-      final imageUrl = await MedicationService.instance.uploadMedicationImage(
-        bytes: _selectedImageBytes!,
-        fileName: _selectedImage!.name,
-      );
+    // STEP 3.7: Check patient ID
+    debugPrint('\n📋 Step 3.7: Checking patient ID...');
+    debugPrint('  -> Patient ID: $_patientId');
+    debugPrint('  -> Current User ID: ${_currentUser?.id}');
+    debugPrint('  -> Current User Role: $_currentUserRole');
 
-      // 2. Save medication to database and get real ID
+    if (_patientId == null || _patientId!.isEmpty) {
+      debugPrint('❌ CRITICAL: No patient ID available');
+      AppSnackbar.error(context, 'Unable to determine which patient this medication is for. Please try again.');
+      setState(() {
+        _isSaving = false;
+        _isCheckingName = false;
+      });
+      return;
+    }
+
+    // STEP 3.8: Collect all form data
+    final medicationName = _genericNameCtrl.text.trim();
+    _currentMedicationName = medicationName;
+
+    debugPrint('\n📋 Step 3.8: Collected all form data:');
+    debugPrint('   ==================================');
+    debugPrint('   Medication Name: "$medicationName"');
+    debugPrint('   Patient ID: "$_patientId"');
+    debugPrint('   Patient Name: "$_patientName"');
+    debugPrint('   Dosage: $dosageAmount $_dosageUnit');
+    debugPrint('   Type: $_medicationType');
+    debugPrint('   Quantity: $quantity');
+    debugPrint('   Color: $_pillColor');
+    debugPrint('   Shape: $_pillShape');
+    debugPrint('   Brand: ${_brandNameCtrl.text.trim().isEmpty ? "Not provided" : _brandNameCtrl.text.trim()}');
+    debugPrint('   Notes: ${_notesCtrl.text.trim().isEmpty ? "Not provided" : _notesCtrl.text.trim()}');
+    debugPrint('   ==================================');
+
+    try {
+      // STEP 3.9: Check for duplicate
+      debugPrint('\n📋 Step 3.9: Checking for duplicate medication...');
+      AppSnackbar.info(context, '🔍 Checking if "$medicationName" is already in your list...');
+
+      final result = await _checkDuplicateInDatabase(medicationName);
+      debugPrint('  -> Duplicate check result: $result');
+
+      // Handle errors from the check
+      if (result.containsKey('error')) {
+        if (!mounted) return;
+        setState(() {
+          _isSaving = false;
+          _isCheckingName = false;
+        });
+        debugPrint('  ❌ Duplicate check error: ${result['error']}');
+        AppSnackbar.error(
+          context,
+          '😕 We had trouble checking if "$medicationName" already exists. Please try again.',
+        );
+        return;
+      }
+
+      final isDuplicate = result['isDuplicate'] as bool;
+
+      if (isDuplicate) {
+        if (!mounted) return;
+        setState(() {
+          _isSaving = false;
+          _isCheckingName = false;
+          _isDuplicate = true;
+        });
+
+        debugPrint('  ⚠️ DUPLICATE DETECTED - stopping save');
+        AppSnackbar.error(
+          context,
+          '"$medicationName" is already in your medication list.',
+        );
+        return;
+      }
+
+      // STEP 3.10: Proceed to upload image
+      debugPrint('\n📋 Step 3.10: Starting image upload...');
+      setState(() {
+        _isCheckingName = false;
+      });
+
+      AppSnackbar.info(context, '📤 Saving "$medicationName" and its photo...');
+
+      String imageUrl;
+      try {
+        debugPrint('  -> Uploading image: ${_selectedImage!.name}');
+        debugPrint('  -> Image bytes size: ${_selectedImageBytes!.length} bytes');
+
+        imageUrl = await MedicationService.instance.uploadMedicationImage(
+          bytes: _selectedImageBytes!,
+          fileName: _selectedImage!.name,
+        );
+
+        debugPrint('  ✅ Image uploaded successfully');
+        debugPrint('  -> Image URL: $imageUrl');
+      } catch (e) {
+        debugPrint('  ❌ Image upload failed: $e');
+        if (!mounted) return;
+        setState(() {
+          _isSaving = false;
+        });
+        AppSnackbar.error(
+          context,
+          '📸 Could not upload the photo for "$medicationName". Please check your connection and try again.',
+        );
+        return;
+      }
+
+      // STEP 3.11: Save medication to database
+      debugPrint('\n📋 Step 3.11: Saving medication to database...');
+      debugPrint('  -> Calling MedicationService.instance.addMedication()');
+
       final medication = await MedicationService.instance.addMedication(
-        genericName: _genericNameCtrl.text.trim(),
+        genericName: medicationName,
         brandName: _brandNameCtrl.text.trim().isEmpty ? null : _brandNameCtrl.text.trim(),
         dosageAmount: dosageAmount,
         dosageUnit: _dosageUnit,
@@ -192,21 +526,30 @@ class _AddMedicationScreenState extends State<AddMedicationScreen> {
         pillColor: _pillColor!,
         pillShape: _pillShape!,
         pillImageUrl: imageUrl,
-        notes: _notesCtrl.text.trim().isEmpty ? null : _notesCtrl.text.trim(), patientId: '',
+        notes: _notesCtrl.text.trim().isEmpty ? null : _notesCtrl.text.trim(),
+        patientId: _patientId!,
       );
 
-      // 3. Cache locally for instant access
+      debugPrint('  ✅ Medication saved successfully!');
+      debugPrint('  -> Medication ID: ${medication.id}');
+
+      // STEP 3.12: Cache locally
+      debugPrint('\n📋 Step 3.12: Caching medication locally...');
       await LocalCacheService.instance.cacheMedication(medication);
+      debugPrint('  ✅ Medication cached locally');
 
       _anySaved = true;
 
       if (!mounted) return;
 
-      // 4. Navigate based on medication type
+      // STEP 3.13: Navigate based on medication type
       if (_medicationType == 'scheduled') {
-        AppSnackbar.success(context, 'Medication saved! Now set up the schedule.');
+        debugPrint('\n📋 Step 3.13: Medication is SCHEDULED - navigating to schedule screen');
+        AppSnackbar.success(
+          context,
+          '✅ "$medicationName" has been saved! Let\'s set up when to take it.',
+        );
 
-        // Navigate to schedule with REAL medication ID
         final result = await Navigator.push(
           context,
           MaterialPageRoute(
@@ -214,14 +557,13 @@ class _AddMedicationScreenState extends State<AddMedicationScreen> {
               medicationId: medication.id,
               medicationName: medication.genericName,
               onOptimisticDoses: (doses) {
-                // Parent can use this for immediate UI updates
-                debugPrint('📊 ${doses.length} optimistic doses created');
+                debugPrint('  📊 ${doses.length} doses scheduled for $medicationName');
               },
               onSaveCompleted: () {
-                debugPrint('✅ Schedule saved successfully');
+                debugPrint('  ✅ Schedule saved for $medicationName');
               },
               onSaveFailed: (error) {
-                debugPrint('❌ Schedule save failed: $error');
+                debugPrint('  ❌ Failed to save schedule for $medicationName: $error');
               },
             ),
           ),
@@ -231,21 +573,89 @@ class _AddMedicationScreenState extends State<AddMedicationScreen> {
           Navigator.pop(context, result == true || _anySaved);
         }
       } else {
-        // As-needed medication - no schedule required
-        AppSnackbar.success(context, 'Medication saved successfully!');
+        debugPrint('\n📋 Step 3.13: Medication is AS NEEDED - no schedule needed');
+        AppSnackbar.success(
+          context,
+          '✅ "$medicationName" has been saved and is ready when you need it!',
+        );
         if (mounted) {
           Navigator.pop(context, true);
         }
       }
+
+      debugPrint('\n✅ STEP 3 COMPLETE: Medication saved successfully!');
+
     } catch (e, stack) {
-      debugPrint('❌ Save medication error: $e');
-      debugPrint('$stack');
+      debugPrint('\n❌ STEP 3 FAILED: Error saving medication');
+      debugPrint('   Error: $e');
+      debugPrint('   Stack trace: $stack');
+      debugPrint('\n💡 Debugging Information:');
+      debugPrint('   ================================');
+      debugPrint('   Current User ID: ${_currentUser?.id}');
+      debugPrint('   Current User Role: $_currentUserRole');
+      debugPrint('   Patient ID: $_patientId');
+      debugPrint('   Patient Name: $_patientName');
+      debugPrint('   Medication Name: $_currentMedicationName');
+      debugPrint('   ================================');
 
       if (mounted) {
-        setState(() => _isSaving = false);
-        AppSnackbar.error(context, 'Failed to save medication. Please try again.');
+        setState(() {
+          _isSaving = false;
+          _isCheckingName = false;
+        });
+
+        // More detailed error handling
+        final errorString = e.toString().toLowerCase();
+        final name = _currentMedicationName.isNotEmpty ? _currentMedicationName : 'this medication';
+
+        if (errorString.contains('duplicate') ||
+            errorString.contains('already exists') ||
+            errorString.contains('unique constraint') ||
+            errorString.contains('unique_violation') ||
+            errorString.contains('23505')) {
+
+          debugPrint('  ⚠️ Database constraint violation detected');
+          AppSnackbar.error(
+            context,
+            '"$name" already exists in your list.',
+          );
+        } else if (errorString.contains('network') ||
+            errorString.contains('timeout') ||
+            errorString.contains('connection') ||
+            errorString.contains('socket')) {
+
+          debugPrint('  ⚠️ Network error detected');
+          AppSnackbar.error(
+            context,
+            '📡 Network issue while saving "$name". Please check your internet connection and try again.',
+          );
+        } else if (errorString.contains('foreign key') ||
+            errorString.contains('patient_id') ||
+            errorString.contains('patient') ||
+            errorString.contains('user_id')) {
+
+          debugPrint('  ⚠️ Patient relationship error');
+          AppSnackbar.error(
+            context,
+            '👤 There was an issue linking this medication to the patient. Please try again.',
+          );
+        } else {
+          debugPrint('  ⚠️ Unknown error type - showing generic message');
+          // Show a truncated error for debugging
+          final truncatedError = e.toString().length > 100
+              ? e.toString().substring(0, 100)
+              : e.toString();
+          AppSnackbar.error(
+            context,
+            '😕 We couldn\'t save "$name" right now. Error: $truncatedError',
+          );
+        }
       }
     }
+
+    debugPrint('\n' + '=' * 60);
+    debugPrint('🏁 MEDICATION SAVE PROCESS COMPLETED');
+    debugPrint('=' * 60 + '\n');
   }
 
   Future<bool> _onWillPop() async {
@@ -269,7 +679,35 @@ class _AddMedicationScreenState extends State<AddMedicationScreen> {
           ),
         ),
         body: SafeArea(
-          child: Column(
+          child: _patientId == null && _currentUserRole == 'caretaker'
+              ? Center(
+            child: Padding(
+              padding: const EdgeInsets.all(32),
+              child: Column(
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: [
+                  Icon(Icons.error_outline, size: 64, color: AppColors.error),
+                  const SizedBox(height: 16),
+                  Text(
+                    'No Patient Selected',
+                    style: AppTextStyles.titleLarge,
+                  ),
+                  const SizedBox(height: 8),
+                  Text(
+                    'Please go back and select a patient\nbefore adding medication.',
+                    style: AppTextStyles.bodyMedium,
+                    textAlign: TextAlign.center,
+                  ),
+                  const SizedBox(height: 24),
+                  AppButton(
+                    label: 'Go Back',
+                    onPressed: () => Navigator.pop(context, false),
+                  ),
+                ],
+              ),
+            ),
+          )
+              : Column(
             children: [
               // Fixed top image card
               Container(
@@ -293,7 +731,7 @@ class _AddMedicationScreenState extends State<AddMedicationScreen> {
                     if (_showImageError) ...[
                       const SizedBox(height: 8),
                       Text(
-                        'Please add a medicine image',
+                        '📸 Please add a medicine image to continue',
                         style: AppTextStyles.bodySmall.copyWith(
                           color: AppColors.error,
                           fontWeight: FontWeight.w600,
@@ -326,10 +764,10 @@ class _AddMedicationScreenState extends State<AddMedicationScreen> {
                           prefixIcon: Icons.medication_outlined,
                           validator: (v) {
                             if (v == null || v.trim().isEmpty) {
-                              return 'Medication name is required';
+                              return 'Please enter the medication name';
                             }
                             if (v.trim().length < 2) {
-                              return 'Name is too short';
+                              return 'Name seems too short. Please enter the full name';
                             }
                             return null;
                           },
@@ -343,7 +781,7 @@ class _AddMedicationScreenState extends State<AddMedicationScreen> {
                           prefixIcon: Icons.label_outline,
                           validator: (v) {
                             if (v != null && v.trim().isNotEmpty && v.trim().length < 2) {
-                              return 'Brand name is too short';
+                              return 'Brand name seems too short';
                             }
                             return null;
                           },
@@ -361,9 +799,9 @@ class _AddMedicationScreenState extends State<AddMedicationScreen> {
                                 prefixIcon: Icons.scale_outlined,
                                 keyboardType: const TextInputType.numberWithOptions(decimal: true),
                                 validator: (v) {
-                                  if (v == null || v.trim().isEmpty) return 'Required';
+                                  if (v == null || v.trim().isEmpty) return 'Please enter the dosage amount';
                                   final amount = double.tryParse(v.trim());
-                                  if (amount == null || amount <= 0) return 'Invalid';
+                                  if (amount == null || amount <= 0) return 'Please enter a valid number';
                                   return null;
                                 },
                               ),
@@ -396,7 +834,7 @@ class _AddMedicationScreenState extends State<AddMedicationScreen> {
                               child: _TypeCard(
                                 label: 'Scheduled',
                                 icon: Icons.schedule_rounded,
-                                description: 'Fixed times daily',
+                                description: 'Take at fixed times each day',
                                 selected: _medicationType == 'scheduled',
                                 onTap: () => setState(() => _medicationType = 'scheduled'),
                               ),
@@ -406,7 +844,7 @@ class _AddMedicationScreenState extends State<AddMedicationScreen> {
                               child: _TypeCard(
                                 label: 'As Needed',
                                 icon: Icons.medical_services_rounded,
-                                description: 'When symptoms appear',
+                                description: 'Take only when needed',
                                 selected: _medicationType == 'prn',
                                 onTap: () => setState(() => _medicationType = 'prn'),
                               ),
@@ -418,11 +856,11 @@ class _AddMedicationScreenState extends State<AddMedicationScreen> {
                         _SectionHeader(
                           icon: Icons.palette_rounded,
                           title: 'Pill Identification',
-                          subtitle: 'Required for future camera verification',
+                          subtitle: 'This helps us identify your medication later',
                         ),
                         const SizedBox(height: 12),
 
-                        Text('Color', style: AppTextStyles.labelLarge),
+                        Text('What color is your pill?', style: AppTextStyles.labelLarge),
                         const SizedBox(height: 8),
 
                         Wrap(
@@ -445,7 +883,7 @@ class _AddMedicationScreenState extends State<AddMedicationScreen> {
                           Padding(
                             padding: const EdgeInsets.only(top: 8),
                             child: Text(
-                              'Select a pill color',
+                              '🎨 Please select the pill color',
                               style: AppTextStyles.bodySmall.copyWith(
                                 color: AppColors.error,
                                 fontWeight: FontWeight.w600,
@@ -454,7 +892,7 @@ class _AddMedicationScreenState extends State<AddMedicationScreen> {
                           ),
                         const SizedBox(height: 16),
 
-                        Text('Shape', style: AppTextStyles.labelLarge),
+                        Text('What shape is your pill?', style: AppTextStyles.labelLarge),
                         const SizedBox(height: 8),
 
                         Wrap(
@@ -474,7 +912,7 @@ class _AddMedicationScreenState extends State<AddMedicationScreen> {
                           Padding(
                             padding: const EdgeInsets.only(top: 8),
                             child: Text(
-                              'Select a pill shape',
+                              '🔵 Please select the pill shape',
                               style: AppTextStyles.bodySmall.copyWith(
                                 color: AppColors.error,
                                 fontWeight: FontWeight.w600,
@@ -485,21 +923,21 @@ class _AddMedicationScreenState extends State<AddMedicationScreen> {
 
                         _SectionHeader(
                           icon: Icons.inventory_2_rounded,
-                          title: 'Inventory',
-                          subtitle: 'Optional',
+                          title: 'Your Supply',
+                          subtitle: 'Optional - helps you know when to refill',
                         ),
                         const SizedBox(height: 12),
 
                         AppTextField(
                           controller: _quantityCtrl,
-                          label: 'Current Quantity',
+                          label: 'How many do you have?',
                           hint: 'e.g. 30 pills',
                           prefixIcon: Icons.medication_liquid_outlined,
                           keyboardType: TextInputType.number,
                           validator: (v) {
                             if (v == null || v.trim().isEmpty) return null;
                             final qty = int.tryParse(v.trim());
-                            if (qty == null || qty < 0) return 'Enter a valid quantity';
+                            if (qty == null || qty < 0) return 'Please enter a valid number';
                             return null;
                           },
                         ),
@@ -508,12 +946,12 @@ class _AddMedicationScreenState extends State<AddMedicationScreen> {
                         AppTextField(
                           controller: _notesCtrl,
                           label: 'Notes (optional)',
-                          hint: 'e.g. Take with food',
+                          hint: 'e.g. Take with food in the morning',
                           prefixIcon: Icons.note_alt_outlined,
                           maxLines: 3,
                           validator: (v) {
                             if (v != null && v.trim().length > 300) {
-                              return 'Notes must be under 300 characters';
+                              return 'Notes can be up to 300 characters';
                             }
                             return null;
                           },
@@ -540,9 +978,11 @@ class _AddMedicationScreenState extends State<AddMedicationScreen> {
                 ),
                 child: SafeArea(
                   child: AppButton(
-                    label: 'Save Medication',
+                    label: _isCheckingName
+                        ? 'Checking if medication exists...'
+                        : 'Save Medication',
                     icon: Icons.check_rounded,
-                    isLoading: _isSaving,
+                    isLoading: _isSaving || _isCheckingName,
                     onPressed: _saveMedication,
                   ),
                 ),
@@ -554,6 +994,7 @@ class _AddMedicationScreenState extends State<AddMedicationScreen> {
     );
   }
 }
+
 
 // ══════════════════════════════════════════════════════════════
 // FORM DATA - Captures all form values for background save
@@ -662,7 +1103,7 @@ class _AddImageCard extends StatelessWidget {
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
                       Text(
-                        hasImage ? 'Medicine image added' : 'Add image',
+                        hasImage ? 'Medicine photo taken' : 'Take a photo',
                         style: AppTextStyles.titleMedium.copyWith(
                           color: Colors.white,
                         ),
@@ -670,8 +1111,8 @@ class _AddImageCard extends StatelessWidget {
                       const SizedBox(height: 4),
                       Text(
                         hasImage
-                            ? 'Tap to retake the medicine photo'
-                            : 'Take a clear photo of the actual medicine',
+                            ? 'Tap to retake if needed'
+                            : 'Show us what the pill looks like',
                         style: AppTextStyles.bodySmall.copyWith(
                           color: Colors.white.withValues(alpha: 0.85),
                         ),

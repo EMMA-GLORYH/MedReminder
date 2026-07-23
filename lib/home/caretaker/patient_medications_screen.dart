@@ -1,9 +1,6 @@
-// lib/screens/home/caretaker/patient_medications_screen.dart
-
 import 'dart:async';
 
 import 'package:flutter/material.dart';
-import 'package:mar/localization/app_localizations.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 
 import '../../../models/medication.dart';
@@ -34,6 +31,9 @@ class PatientMedicationsScreen extends StatefulWidget {
 class _PatientMedicationsScreenState extends State<PatientMedicationsScreen>
     with WidgetsBindingObserver {
   List<Medication> _medications = <Medication>[];
+  final Set<String> _expandedMedicationIds = <String>{};
+
+  String _resolvedPatientId = '';
 
   bool _isLoading = true;
   bool _isLoadingFromCache = true;
@@ -45,7 +45,6 @@ class _PatientMedicationsScreenState extends State<PatientMedicationsScreen>
   RealtimeChannel? _realtimeChannel;
   bool _isSubscribed = false;
 
-  // Optimistic updates tracking
   final Set<String> _optimisticMedicationIds = {};
 
   @override
@@ -68,49 +67,74 @@ class _PatientMedicationsScreenState extends State<PatientMedicationsScreen>
       _resubscribeToRealtime();
       _refreshData();
     } else if (state == AppLifecycleState.paused) {
-      // Supabase handles this automatically, but we track state
-      setState(() => _isSubscribed = false);
+      if (mounted) {
+        setState(() => _isSubscribed = false);
+      }
     }
   }
 
+  Future<String> _resolveTruePatientId(String id) async {
+    final safeId = id.trim();
+    if (safeId.isEmpty) return safeId;
+
+    try {
+      final profile = await Supabase.instance.client
+          .from('profiles')
+          .select('id')
+          .eq('id', safeId)
+          .maybeSingle();
+
+      if (profile != null && profile['id'] != null) {
+        return safeId;
+      }
+    } catch (_) {}
+
+    try {
+      final relationship = await Supabase.instance.client
+          .from('care_relationships')
+          .select('patient_id')
+          .eq('id', safeId)
+          .maybeSingle();
+
+      if (relationship != null && relationship['patient_id'] != null) {
+        return relationship['patient_id'].toString();
+      }
+    } catch (_) {}
+
+    return safeId;
+  }
+
   Future<void> _initialize() async {
-    // Load from cache first for instant UI
+    _resolvedPatientId = await _resolveTruePatientId(widget.patientId);
+    debugPrint('🚀 Using resolved patient ID: $_resolvedPatientId');
+
     await _loadFromCache();
 
-    // Then check permissions and load from server
     await Future.wait([
       _checkPermission(),
       _loadMedications(),
     ]);
 
-    // Subscribe to Supabase Realtime for real-time updates
     _subscribeToRealtime();
   }
 
   Future<void> _loadFromCache() async {
     try {
-      debugPrint('📦 Loading medications from cache for patient: ${widget.patientId}');
+      final allCachedMedications =
+      await LocalCacheService.instance.getCachedMedications();
 
-      final allCachedMedications = await LocalCacheService.instance.getCachedMedications();
-
-      // Filter medications for this patient
       final cachedMedications = allCachedMedications
-          .where((med) => med.patientId == widget.patientId)
+          .where((med) => med.patientId == _resolvedPatientId)
           .toList();
 
-      if (cachedMedications.isNotEmpty && mounted) {
-        debugPrint('✅ Loaded ${cachedMedications.length} medications from cache');
+      if (!mounted) return;
 
-        setState(() {
+      setState(() {
+        if (cachedMedications.isNotEmpty) {
           _medications = cachedMedications;
-          _isLoadingFromCache = false;
-        });
-      } else {
-        debugPrint('ℹ️ No cached medications found');
-        if (mounted) {
-          setState(() => _isLoadingFromCache = false);
         }
-      }
+        _isLoadingFromCache = false;
+      });
     } catch (e) {
       debugPrint('❌ Error loading from cache: $e');
       if (mounted) {
@@ -122,7 +146,7 @@ class _PatientMedicationsScreenState extends State<PatientMedicationsScreen>
   Future<void> _checkPermission() async {
     try {
       final canEdit = await CareRelationshipService.instance
-          .canEditMedications(widget.patientId);
+          .canEditMedications(_resolvedPatientId);
 
       if (mounted) {
         setState(() {
@@ -147,16 +171,15 @@ class _PatientMedicationsScreenState extends State<PatientMedicationsScreen>
     });
 
     try {
-      debugPrint('🔄 Loading medications from server for patient: ${widget.patientId}');
+      debugPrint(
+        '🔄 Loading medications from server for patient: $_resolvedPatientId',
+      );
 
       final medications = await MedicationService.instance
-          .getMedicationsForPatient(widget.patientId);
+          .getMedicationsForPatient(_resolvedPatientId);
 
       if (!mounted) return;
 
-      debugPrint('✅ Loaded ${medications.length} medications from server');
-
-      // Cache the medications locally
       for (final medication in medications) {
         await LocalCacheService.instance.cacheMedication(medication);
       }
@@ -165,7 +188,7 @@ class _PatientMedicationsScreenState extends State<PatientMedicationsScreen>
         _medications = medications;
         _isLoading = false;
         _hasLoadedFromServer = true;
-        _optimisticMedicationIds.clear(); // Clear optimistic updates
+        _optimisticMedicationIds.clear();
       });
     } catch (error, stack) {
       debugPrint('❌ Failed to load patient medications: $error');
@@ -176,111 +199,322 @@ class _PatientMedicationsScreenState extends State<PatientMedicationsScreen>
       setState(() {
         _error = error.toString().replaceAll('Exception: ', '');
         _isLoading = false;
-
-        // If we have cache data, keep showing it despite error
         if (_medications.isEmpty) {
           _hasLoadedFromServer = false;
         }
       });
 
-      // Show subtle error if we have cached data
       if (_medications.isNotEmpty && mounted) {
-        AppSnackbar.warning(
+        AppSnackbar.warning(context, 'Showing cached data. Connection issue.');
+      }
+    }
+  }
+
+  void _toggleExpanded(String medicationId) {
+    setState(() {
+      if (_expandedMedicationIds.contains(medicationId)) {
+        _expandedMedicationIds.remove(medicationId);
+      } else {
+        _expandedMedicationIds.add(medicationId);
+      }
+    });
+  }
+
+  Future<void> _promptScheduleMedication(Medication medication) async {
+    if (!_canEdit) {
+      _showMedicationDetails(medication);
+      return;
+    }
+
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Schedule or reschedule?'),
+        content: Text(
+          'Do you want to schedule or reschedule ${medication.displayName} for ${widget.patientName}?',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, false),
+            child: const Text('Cancel'),
+          ),
+          ElevatedButton(
+            onPressed: () => Navigator.pop(context, true),
+            style: ElevatedButton.styleFrom(
+              backgroundColor: AppColors.primary,
+              foregroundColor: Colors.white,
+            ),
+            child: const Text('Continue'),
+          ),
+        ],
+      ),
+    );
+
+    if (confirmed != true || !mounted) return;
+
+    final result = await Navigator.push<bool>(
+      context,
+      MaterialPageRoute(
+        builder: (_) => CaretakerAddScheduleScreen(
+          medicationId: medication.id,
+          medicationName: medication.displayName,
+          patientId: _resolvedPatientId,
+          patientName: widget.patientName,
+        ),
+      ),
+    );
+
+    if (result == true && mounted) {
+      _refreshData();
+    }
+  }
+
+  Future<void> _openEditMedication(Medication medication) async {
+    if (!_canEdit) {
+      AppSnackbar.error(
+        context,
+        'You do not have permission to edit medications for this patient.',
+      );
+      return;
+    }
+
+    final result = await Navigator.push<bool>(
+      context,
+      MaterialPageRoute(
+        builder: (_) => CaretakerAddMedicationScreen(
+          patientId: _resolvedPatientId,
+          patientName: widget.patientName,
+          initialMedication: medication,
+        ),
+      ),
+    );
+
+    if (result == true && mounted) {
+      _refreshData();
+    }
+  }
+
+  Future<void> _deleteMedication(Medication medication) async {
+    if (!_canEdit) {
+      AppSnackbar.error(
+        context,
+        'You do not have permission to delete medications for this patient.',
+      );
+      return;
+    }
+
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Delete medication?'),
+        content: Text(
+          'This will remove ${medication.displayName} and deactivate any linked schedules.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, false),
+            child: const Text('Cancel'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(context, true),
+            style: TextButton.styleFrom(foregroundColor: AppColors.error),
+            child: const Text('Delete'),
+          ),
+        ],
+      ),
+    );
+
+    if (confirmed != true) return;
+
+    try {
+      await MedicationService.instance
+          .deleteMedicationWithSchedules(medication.id);
+
+      if (!mounted) return;
+
+      setState(() {
+        _medications.removeWhere((m) => m.id == medication.id);
+        _expandedMedicationIds.remove(medication.id);
+      });
+
+      await _recacheMedications();
+
+      AppSnackbar.success(
+        context,
+        '${medication.displayName} deleted',
+      );
+    } catch (e, stack) {
+      debugPrint('❌ Delete medication error: $e');
+      debugPrint('$stack');
+
+      if (mounted) {
+        AppSnackbar.error(
           context,
-          'Showing cached data. Connection issue.',
+          'Failed to delete medication. Please try again.',
         );
       }
     }
   }
 
+  void _showMedicationDetails(Medication medication) {
+    showModalBottomSheet<void>(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: Colors.transparent,
+      builder: (context) {
+        final imageUrl = medication.pillImageUrl?.trim();
+        final hasImage = imageUrl != null && imageUrl.isNotEmpty;
+
+        return SafeArea(
+          top: false,
+          child: Padding(
+            padding: const EdgeInsets.all(12),
+            child: Container(
+              decoration: BoxDecoration(
+                color: AppColors.surface,
+                borderRadius: BorderRadius.circular(24),
+              ),
+              child: SingleChildScrollView(
+                padding: const EdgeInsets.fromLTRB(18, 18, 18, 24),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Row(
+                      children: [
+                        Text(
+                          'Medication Details',
+                          style: AppTextStyles.titleMedium.copyWith(
+                            fontWeight: FontWeight.w800,
+                          ),
+                        ),
+                        const Spacer(),
+                        IconButton(
+                          onPressed: () => Navigator.pop(context),
+                          icon: const Icon(Icons.close_rounded),
+                        ),
+                      ],
+                    ),
+                    const SizedBox(height: 8),
+                    Center(
+                      child: ClipRRect(
+                        borderRadius: BorderRadius.circular(18),
+                        child: hasImage
+                            ? Image.network(
+                          imageUrl,
+                          width: 140,
+                          height: 140,
+                          fit: BoxFit.cover,
+                          errorBuilder: (_, __, ___) =>
+                          const _MedicationPreviewIcon(size: 140),
+                        )
+                            : const _MedicationPreviewIcon(size: 140),
+                      ),
+                    ),
+                    const SizedBox(height: 18),
+                    _DetailRow(
+                      label: 'Name',
+                      value: medication.displayName,
+                    ),
+                    _DetailRow(
+                      label: 'Generic name',
+                      value: medication.genericName,
+                    ),
+                    _DetailRow(
+                      label: 'Dosage',
+                      value: medication.displayDosage,
+                    ),
+                    _DetailRow(
+                      label: 'Type',
+                      value: medication.medicationType,
+                    ),
+                    if (medication.currentQuantity != null)
+                      _DetailRow(
+                        label: 'Quantity',
+                        value: '${medication.currentQuantity}',
+                      ),
+                    if ((medication.pillColor ?? '').trim().isNotEmpty)
+                      _DetailRow(
+                        label: 'Color',
+                        value: medication.pillColor!,
+                      ),
+                    if ((medication.pillShape ?? '').trim().isNotEmpty)
+                      _DetailRow(
+                        label: 'Shape',
+                        value: medication.pillShape!,
+                      ),
+                    if ((medication.notes ?? '').trim().isNotEmpty)
+                      _DetailRow(
+                        label: 'Notes',
+                        value: medication.notes!,
+                      ),
+                  ],
+                ),
+              ),
+            ),
+          ),
+        );
+      },
+    );
+  }
+
   void _subscribeToRealtime() {
-    if (_realtimeChannel != null) {
-      debugPrint('⚠️ Already subscribed to realtime');
-      return;
-    }
+    if (_realtimeChannel != null) return;
 
     try {
-      debugPrint('🔌 Subscribing to Supabase Realtime for medications table');
-      debugPrint('   Filtering by patient_id: ${widget.patientId}');
-
       _realtimeChannel = Supabase.instance.client
-          .channel('medications:patient_id=eq.${widget.patientId}')
+          .channel('medications:$_resolvedPatientId')
           .onPostgresChanges(
         event: PostgresChangeEvent.insert,
         schema: 'public',
         table: 'medications',
-        filter: PostgresChangeFilter(
-          type: PostgresChangeFilterType.eq,
-          column: 'patient_id',
-          value: widget.patientId,
-        ),
-        callback: _handleInsert,
-      )
-          .onPostgresChanges(
+        callback: (payload) {
+          if (payload.newRecord['patient_id']?.toString() ==
+              _resolvedPatientId) {
+            _handleInsert(payload);
+          }
+        },
+      ).onPostgresChanges(
         event: PostgresChangeEvent.update,
         schema: 'public',
         table: 'medications',
-        filter: PostgresChangeFilter(
-          type: PostgresChangeFilterType.eq,
-          column: 'patient_id',
-          value: widget.patientId,
-        ),
-        callback: _handleUpdate,
-      )
-          .onPostgresChanges(
+        callback: (payload) {
+          if (payload.newRecord['patient_id']?.toString() ==
+              _resolvedPatientId) {
+            _handleUpdate(payload);
+          }
+        },
+      ).onPostgresChanges(
         event: PostgresChangeEvent.delete,
         schema: 'public',
         table: 'medications',
-        filter: PostgresChangeFilter(
-          type: PostgresChangeFilterType.eq,
-          column: 'patient_id',
-          value: widget.patientId,
-        ),
-        callback: _handleDelete,
-      )
-          .subscribe((status, error) {
+        callback: (payload) => _handleDelete(payload),
+      ).subscribe((status, error) {
         if (status == RealtimeSubscribeStatus.subscribed) {
-          debugPrint('✅ Successfully subscribed to Supabase Realtime');
-          if (mounted) {
-            setState(() => _isSubscribed = true);
-          }
+          debugPrint('✅ Realtime subscribed');
+          if (mounted) setState(() => _isSubscribed = true);
         } else if (status == RealtimeSubscribeStatus.closed) {
-          debugPrint('⚠️ Realtime subscription closed');
-          if (mounted) {
-            setState(() => _isSubscribed = false);
-          }
+          if (mounted) setState(() => _isSubscribed = false);
         } else if (status == RealtimeSubscribeStatus.channelError) {
-          debugPrint('❌ Realtime channel error: $error');
-          if (mounted) {
-            setState(() => _isSubscribed = false);
-          }
+          debugPrint('❌ Realtime error: $error');
+          if (mounted) setState(() => _isSubscribed = false);
         }
       });
     } catch (e, stack) {
-      debugPrint('❌ Error subscribing to realtime: $e');
+      debugPrint('❌ Realtime subscribe exception: $e');
       debugPrint('$stack');
     }
   }
 
   void _handleInsert(PostgresChangePayload payload) {
-    debugPrint('📨 Realtime INSERT event received');
-    debugPrint('   New record: ${payload.newRecord}');
-
     try {
       final medication = Medication.fromJson(payload.newRecord);
 
-      // Skip if this is an optimistic update we already have
       if (_optimisticMedicationIds.contains(medication.id)) {
-        debugPrint('   ⏭️ Skipping optimistic update for: ${medication.id}');
         _optimisticMedicationIds.remove(medication.id);
         return;
       }
 
-      // Check if medication already exists (shouldn't happen, but safety check)
-      if (_medications.any((m) => m.id == medication.id)) {
-        debugPrint('   ⚠️ Medication already exists, skipping: ${medication.id}');
-        return;
-      }
+      if (_medications.any((m) => m.id == medication.id)) return;
 
       if (mounted) {
         setState(() {
@@ -288,135 +522,90 @@ class _PatientMedicationsScreenState extends State<PatientMedicationsScreen>
           _medications.sort((a, b) => a.displayName.compareTo(b.displayName));
         });
 
-        // Cache locally
         LocalCacheService.instance.cacheMedication(medication);
-
-        AppSnackbar.success(
-          context,
-          '${medication.displayName} added',
-        );
-
-        debugPrint('✅ Medication added to list: ${medication.displayName}');
       }
     } catch (e, stack) {
-      debugPrint('❌ Error handling INSERT event: $e');
+      debugPrint('❌ Insert handler error: $e');
       debugPrint('$stack');
     }
   }
 
   void _handleUpdate(PostgresChangePayload payload) {
-    debugPrint('📨 Realtime UPDATE event received');
-    debugPrint('   Old record: ${payload.oldRecord}');
-    debugPrint('   New record: ${payload.newRecord}');
-
     try {
       final medication = Medication.fromJson(payload.newRecord);
 
       if (mounted) {
         setState(() {
           final index = _medications.indexWhere((m) => m.id == medication.id);
+
+          if (medication.isActive == false) {
+            if (index != -1) {
+              _medications.removeAt(index);
+              _expandedMedicationIds.remove(medication.id);
+            }
+            return;
+          }
+
           if (index != -1) {
             _medications[index] = medication;
-            debugPrint('✅ Medication updated: ${medication.displayName}');
           } else {
-            debugPrint('⚠️ Medication not found for update: ${medication.id}');
+            _medications.add(medication);
           }
         });
 
-        // Update cache
+        _medications.sort((a, b) => a.displayName.compareTo(b.displayName));
         LocalCacheService.instance.cacheMedication(medication);
-
-        AppSnackbar.info(
-          context,
-          '${medication.displayName} updated',
-        );
       }
     } catch (e, stack) {
-      debugPrint('❌ Error handling UPDATE event: $e');
+      debugPrint('❌ Update handler error: $e');
       debugPrint('$stack');
     }
   }
 
   void _handleDelete(PostgresChangePayload payload) {
-    debugPrint('📨 Realtime DELETE event received');
-    debugPrint('   Old record: ${payload.oldRecord}');
-
     try {
-      final medicationId = payload.oldRecord['id'] as String;
+      final medicationId = payload.oldRecord['id'] as String?;
+      if (medicationId == null) return;
 
-      if (mounted) {
-        final medication = _medications.firstWhere(
-              (m) => m.id == medicationId,
-          orElse: () => Medication(
-            id: medicationId,
-            patientId: widget.patientId,
-            genericName: 'Unknown',
-            dosageAmount: 0,
-            dosageUnit: '',
-            medicationType: '',
-            createdAt: DateTime.now(),
-            updatedAt: DateTime.now(), refillAlertAt:0, isActive: false,
-          ),
-        );
-
+      final existingIndex = _medications.indexWhere((m) => m.id == medicationId);
+      if (existingIndex != -1 && mounted) {
         setState(() {
-          _medications.removeWhere((m) => m.id == medicationId);
+          _medications.removeAt(existingIndex);
+          _expandedMedicationIds.remove(medicationId);
         });
-
-        // Remove from cache - clear all and re-cache remaining
         _recacheMedications();
-
-        AppSnackbar.info(
-          context,
-          '${medication.displayName} removed',
-        );
-
-        debugPrint('✅ Medication deleted: ${medication.displayName}');
       }
     } catch (e, stack) {
-      debugPrint('❌ Error handling DELETE event: $e');
+      debugPrint('❌ Delete handler error: $e');
       debugPrint('$stack');
     }
   }
 
   Future<void> _recacheMedications() async {
     try {
-      // Clear existing cache
       await LocalCacheService.instance.clearMedicationCache();
-
-      // Re-cache current medications
       for (final medication in _medications) {
         await LocalCacheService.instance.cacheMedication(medication);
       }
-
-      debugPrint('✅ Medications re-cached successfully');
     } catch (e) {
-      debugPrint('❌ Error re-caching medications: $e');
+      debugPrint('❌ Re-cache error: $e');
     }
   }
 
   void _resubscribeToRealtime() {
-    debugPrint('🔄 Resubscribing to Supabase Realtime');
     _unsubscribeFromRealtime();
     _subscribeToRealtime();
   }
 
   Future<void> _unsubscribeFromRealtime() async {
     if (_realtimeChannel != null) {
-      debugPrint('🔌 Unsubscribing from Supabase Realtime');
-
       await Supabase.instance.client.removeChannel(_realtimeChannel!);
       _realtimeChannel = null;
-
-      if (mounted) {
-        setState(() => _isSubscribed = false);
-      }
+      if (mounted) setState(() => _isSubscribed = false);
     }
   }
 
-  Future<void> _refreshData() async {
-    await _loadMedications();
-  }
+  Future<void> _refreshData() async => _loadMedications();
 
   void _openAddMedication() {
     if (!_canEdit) {
@@ -427,19 +616,16 @@ class _PatientMedicationsScreenState extends State<PatientMedicationsScreen>
       return;
     }
 
-    Navigator.push(
+    Navigator.push<bool>(
       context,
       MaterialPageRoute(
         builder: (_) => CaretakerAddMedicationScreen(
-          patientId: widget.patientId,
+          patientId: _resolvedPatientId,
           patientName: widget.patientName,
         ),
       ),
-    ).then((result) {
-      if (result == true && mounted) {
-        // Realtime will handle the update, but refresh just in case
-        _refreshData();
-      }
+    ).then((_) {
+      _refreshData();
     });
   }
 
@@ -480,7 +666,6 @@ class _PatientMedicationsScreenState extends State<PatientMedicationsScreen>
         foregroundColor: AppColors.textPrimary,
         elevation: 0,
         actions: [
-          // Real-time indicator
           if (_isSubscribed)
             Padding(
               padding: const EdgeInsets.only(right: 8),
@@ -523,9 +708,7 @@ class _PatientMedicationsScreenState extends State<PatientMedicationsScreen>
             ),
         ],
       ),
-      body: SafeArea(
-        child: _buildBody(),
-      ),
+      body: SafeArea(child: _buildBody()),
       floatingActionButton: _canEdit ? _buildAddMedicationFab() : null,
     );
   }
@@ -535,10 +718,7 @@ class _PatientMedicationsScreenState extends State<PatientMedicationsScreen>
       mainAxisSize: MainAxisSize.min,
       children: [
         Container(
-          padding: const EdgeInsets.symmetric(
-            horizontal: 12,
-            vertical: 6,
-          ),
+          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
           decoration: BoxDecoration(
             color: AppColors.primary,
             borderRadius: BorderRadius.circular(20),
@@ -550,15 +730,11 @@ class _PatientMedicationsScreenState extends State<PatientMedicationsScreen>
               ),
             ],
           ),
-          child: Row(
+          child: const Row(
             mainAxisSize: MainAxisSize.min,
             children: [
-              Icon(
-                Icons.medication_rounded,
-                size: 14,
-                color: Colors.white,
-              ),
-              const SizedBox(width: 4),
+              Icon(Icons.medication_rounded, size: 14, color: Colors.white),
+              SizedBox(width: 4),
               Text(
                 'Add',
                 style: TextStyle(
@@ -591,13 +767,6 @@ class _PatientMedicationsScreenState extends State<PatientMedicationsScreen>
                   begin: Alignment.topLeft,
                   end: Alignment.bottomRight,
                 ),
-                boxShadow: [
-                  BoxShadow(
-                    color: AppColors.primary.withOpacity(0.4),
-                    blurRadius: 12,
-                    offset: const Offset(0, 4),
-                  ),
-                ],
               ),
               child: const Icon(
                 Icons.add_rounded,
@@ -612,15 +781,12 @@ class _PatientMedicationsScreenState extends State<PatientMedicationsScreen>
   }
 
   Widget _buildBody() {
-    // Show loading only if we have no cache data
     if ((_checkingPermission || _isLoadingFromCache) && _medications.isEmpty) {
       return Center(
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
-            CircularProgressIndicator(
-              color: AppColors.primary,
-            ),
+            CircularProgressIndicator(color: AppColors.primary),
             const SizedBox(height: 16),
             Text(
               'Loading medications...',
@@ -633,7 +799,6 @@ class _PatientMedicationsScreenState extends State<PatientMedicationsScreen>
       );
     }
 
-    // Show error only if we have no cached data
     if (_error != null && _medications.isEmpty) {
       return RefreshIndicator(
         color: AppColors.primary,
@@ -723,18 +888,6 @@ class _PatientMedicationsScreenState extends State<PatientMedicationsScreen>
                       onPressed: _openAddMedication,
                       icon: const Icon(Icons.add_rounded),
                       label: const Text('Add First Medication'),
-                      style: ElevatedButton.styleFrom(
-                        backgroundColor: AppColors.primary,
-                        foregroundColor: Colors.white,
-                        padding: const EdgeInsets.symmetric(
-                          horizontal: 24,
-                          vertical: 14,
-                        ),
-                        shape: RoundedRectangleBorder(
-                          borderRadius: BorderRadius.circular(12),
-                        ),
-                        elevation: 2,
-                      ),
                     ),
                   ],
                 ],
@@ -756,15 +909,20 @@ class _PatientMedicationsScreenState extends State<PatientMedicationsScreen>
             itemCount: _medications.length,
             separatorBuilder: (_, __) => const SizedBox(height: 12),
             itemBuilder: (context, index) {
+              final medication = _medications[index];
               return _MedicationCard(
-                medication: _medications[index],
-                patientId: widget.patientId,
+                medication: medication,
                 patientName: widget.patientName,
+                isExpanded: _expandedMedicationIds.contains(medication.id),
+                canEdit: _canEdit,
+                onTapSchedule: () => _promptScheduleMedication(medication),
+                onToggleExpanded: () => _toggleExpanded(medication.id),
+                onFullView: () => _showMedicationDetails(medication),
+                onEdit: () => _openEditMedication(medication),
+                onDelete: () => _deleteMedication(medication),
               );
             },
           ),
-
-          // Subtle loading indicator when refreshing with existing data
           if (_isLoading && _medications.isNotEmpty)
             Positioned(
               top: 0,
@@ -809,13 +967,25 @@ class _PatientMedicationsScreenState extends State<PatientMedicationsScreen>
 
 class _MedicationCard extends StatelessWidget {
   final Medication medication;
-  final String patientId;
   final String patientName;
+  final bool isExpanded;
+  final bool canEdit;
+  final VoidCallback onTapSchedule;
+  final VoidCallback onToggleExpanded;
+  final VoidCallback onFullView;
+  final VoidCallback onEdit;
+  final VoidCallback onDelete;
 
   const _MedicationCard({
     required this.medication,
-    required this.patientId,
     required this.patientName,
+    required this.isExpanded,
+    required this.canEdit,
+    required this.onTapSchedule,
+    required this.onToggleExpanded,
+    required this.onFullView,
+    required this.onEdit,
+    required this.onDelete,
   });
 
   @override
@@ -823,121 +993,239 @@ class _MedicationCard extends StatelessWidget {
     final imageUrl = medication.pillImageUrl?.trim();
     final hasImage = imageUrl != null && imageUrl.isNotEmpty;
 
-    return InkWell(
-      onTap: () {
-        Navigator.push(
-          context,
-          MaterialPageRoute(
-            builder: (_) => CaretakerAddScheduleScreen(
-              medicationId: medication.id,
-              medicationName: medication.displayName,
-              patientId: patientId,
-              patientName: patientName,
-            ),
+    return AnimatedContainer(
+      duration: const Duration(milliseconds: 220),
+      decoration: BoxDecoration(
+        color: AppColors.surface,
+        borderRadius: BorderRadius.circular(18),
+        border: Border.all(color: AppColors.border),
+        boxShadow: [
+          BoxShadow(
+            color: Colors.black.withValues(alpha: 0.04),
+            blurRadius: 12,
+            offset: const Offset(0, 3),
           ),
-        );
-      },
-      borderRadius: BorderRadius.circular(18),
-      child: Container(
-        padding: const EdgeInsets.all(14),
-        decoration: BoxDecoration(
-          color: AppColors.surface,
-          borderRadius: BorderRadius.circular(18),
-          border: Border.all(
-            color: AppColors.border,
-          ),
-          boxShadow: [
-            BoxShadow(
-              color: Colors.black.withValues(alpha: 0.04),
-              blurRadius: 12,
-              offset: const Offset(0, 3),
-            ),
-          ],
-        ),
-        child: Row(
-          children: [
-            ClipRRect(
-              borderRadius: BorderRadius.circular(14),
-              child: hasImage
-                  ? Image.network(
-                imageUrl,
-                width: 72,
-                height: 72,
-                fit: BoxFit.cover,
-                errorBuilder: (_, __, ___) {
-                  return const _MedicationIcon();
-                },
-              )
-                  : const _MedicationIcon(),
-            ),
-            const SizedBox(width: 14),
-            Expanded(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
+        ],
+      ),
+      child: Column(
+        children: [
+          InkWell(
+            onTap: onTapSchedule,
+            borderRadius: BorderRadius.circular(18),
+            child: Padding(
+              padding: const EdgeInsets.all(14),
+              child: Row(
                 children: [
-                  Text(
-                    medication.displayName,
-                    style: AppTextStyles.titleMedium.copyWith(
-                      fontWeight: FontWeight.w800,
-                    ),
-                    maxLines: 2,
-                    overflow: TextOverflow.ellipsis,
+                  ClipRRect(
+                    borderRadius: BorderRadius.circular(14),
+                    child: hasImage
+                        ? Image.network(
+                      imageUrl,
+                      width: 72,
+                      height: 72,
+                      fit: BoxFit.cover,
+                      errorBuilder: (_, __, ___) =>
+                      const _MedicationPreviewIcon(size: 72),
+                    )
+                        : const _MedicationPreviewIcon(size: 72),
                   ),
-                  const SizedBox(height: 4),
-                  Text(
-                    medication.displayDosage,
-                    style: AppTextStyles.bodyMedium.copyWith(
-                      color: AppColors.secondary,
-                      fontWeight: FontWeight.w700,
+                  const SizedBox(width: 14),
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          medication.displayName,
+                          style: AppTextStyles.titleMedium.copyWith(
+                            fontWeight: FontWeight.w800,
+                          ),
+                          maxLines: 2,
+                          overflow: TextOverflow.ellipsis,
+                        ),
+                        const SizedBox(height: 4),
+                        Text(
+                          medication.displayDosage,
+                          style: AppTextStyles.bodyMedium.copyWith(
+                            color: AppColors.secondary,
+                            fontWeight: FontWeight.w700,
+                          ),
+                        ),
+                        const SizedBox(height: 5),
+                        Text(
+                          medication.medicationType,
+                          style: AppTextStyles.bodySmall.copyWith(
+                            color: AppColors.textSecondary,
+                          ),
+                        ),
+                        if (medication.currentQuantity != null) ...[
+                          const SizedBox(height: 4),
+                          Text(
+                            'Quantity: ${medication.currentQuantity}',
+                            style: AppTextStyles.bodySmall.copyWith(
+                              color: medication.needsRefill
+                                  ? AppColors.warning
+                                  : AppColors.textSecondary,
+                            ),
+                          ),
+                        ],
+                      ],
                     ),
                   ),
-                  const SizedBox(height: 5),
-                  Text(
-                    medication.medicationType,
-                    style: AppTextStyles.bodySmall.copyWith(
-                      color: AppColors.textSecondary,
-                    ),
-                  ),
-                  if (medication.currentQuantity != null) ...[
-                    const SizedBox(height: 4),
-                    Text(
-                      'Quantity: ${medication.currentQuantity}',
-                      style: AppTextStyles.bodySmall.copyWith(
-                        color: medication.needsRefill
-                            ? AppColors.warning
-                            : AppColors.textSecondary,
+                  Column(
+                    children: [
+                      IconButton(
+                        onPressed: onToggleExpanded,
+                        icon: Icon(
+                          isExpanded
+                              ? Icons.expand_less_rounded
+                              : Icons.more_horiz_rounded,
+                          color: AppColors.textSecondary,
+                        ),
+                        tooltip: 'More actions',
                       ),
-                    ),
-                  ],
+                      const Icon(
+                        Icons.schedule_rounded,
+                        size: 18,
+                        color: AppColors.primary,
+                      ),
+                    ],
+                  ),
                 ],
               ),
             ),
-            Icon(
-              Icons.arrow_forward_ios_rounded,
-              size: 16,
-              color: AppColors.textSecondary,
+          ),
+          AnimatedCrossFade(
+            duration: const Duration(milliseconds: 220),
+            crossFadeState: isExpanded
+                ? CrossFadeState.showSecond
+                : CrossFadeState.showFirst,
+            firstChild: const SizedBox.shrink(),
+            secondChild: Container(
+              width: double.infinity,
+              padding: const EdgeInsets.fromLTRB(14, 0, 14, 14),
+              child: Column(
+                children: [
+                  Divider(color: AppColors.secondaryDark, height: 1),
+                  const SizedBox(height: 12),
+                  Wrap(
+                    spacing: 8,
+                    runSpacing: 8,
+                    children: [
+                      _MedicationActionChip(
+                        label: 'Full View',
+                        icon: Icons.visibility_outlined,
+                        onTap: onFullView,
+                      ),
+                      _MedicationActionChip(
+                        label: 'Edit',
+                        icon: Icons.edit_outlined,
+                        onTap: canEdit ? onEdit : null,
+                      ),
+                      _MedicationActionChip(
+                        label: 'Delete',
+                        icon: Icons.delete_outline_rounded,
+                        foregroundColor: AppColors.error,
+                        onTap: canEdit ? onDelete : null,
+                      ),
+                    ],
+                  ),
+                ],
+              ),
             ),
-          ],
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _MedicationActionChip extends StatelessWidget {
+  final String label;
+  final IconData icon;
+  final Color? foregroundColor;
+  final VoidCallback? onTap;
+
+  const _MedicationActionChip({
+    required this.label,
+    required this.icon,
+    this.foregroundColor,
+    this.onTap,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final color = foregroundColor ?? AppColors.primary;
+
+    return OutlinedButton.icon(
+      onPressed: onTap,
+      icon: Icon(icon, size: 16),
+      label: Text(label),
+      style: OutlinedButton.styleFrom(
+        foregroundColor: color,
+        side: BorderSide(color: color.withOpacity(0.35)),
+        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+        shape: RoundedRectangleBorder(
+          borderRadius: BorderRadius.circular(12),
         ),
       ),
     );
   }
 }
 
-class _MedicationIcon extends StatelessWidget {
-  const _MedicationIcon();
+class _MedicationPreviewIcon extends StatelessWidget {
+  final double size;
+
+  const _MedicationPreviewIcon({required this.size});
 
   @override
   Widget build(BuildContext context) {
     return Container(
-      width: 72,
-      height: 72,
+      width: size,
+      height: size,
       color: AppColors.surfaceVariant,
       alignment: Alignment.center,
-      child: const Icon(
+      child: Icon(
         Icons.medication_rounded,
-        size: 36,
+        size: size * 0.45,
         color: AppColors.secondary,
+      ),
+    );
+  }
+}
+
+class _DetailRow extends StatelessWidget {
+  final String label;
+  final String value;
+
+  const _DetailRow({
+    required this.label,
+    required this.value,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 12),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          SizedBox(
+            width: 110,
+            child: Text(
+              label,
+              style: AppTextStyles.bodySmall.copyWith(
+                color: AppColors.textSecondary,
+                fontWeight: FontWeight.w600,
+              ),
+            ),
+          ),
+          Expanded(
+            child: Text(
+              value,
+              style: AppTextStyles.bodyMedium,
+            ),
+          ),
+        ],
       ),
     );
   }

@@ -102,12 +102,9 @@ class MedicationSchedule {
   }
 
   /// Parse Supabase TIME[] array into Flutter TimeOfDay list
-  /// Supabase returns time arrays as: ["08:00:00", "20:00:00"]
   static List<TimeOfDay>? _parseTimeArray(dynamic raw) {
     if (raw == null) return null;
-
     final list = raw is List ? raw : [];
-
     return list.map((time) {
       final parts = (time as String).split(':');
       return TimeOfDay(
@@ -117,7 +114,65 @@ class MedicationSchedule {
     }).toList();
   }
 
-  /// Helpers
+  // ══════════════════════════════════════════════════════════════
+  // ✅ NEW: Change Detection Methods
+  // ══════════════════════════════════════════════════════════════
+
+  /// Check if schedule content has changed (ignores timestamps)
+  bool hasContentChanged({
+    required String newFrequencyType,
+    required bool newEscalationEnabled,
+    required double? newIntervalHours,
+    required List<TimeOfDay>? newScheduledTimes,
+    required List<int>? newScheduledDays,
+  }) {
+    // Frequency type changed
+    if (frequencyType != newFrequencyType) return true;
+
+    // Escalation changed
+    if (escalationEnabled != newEscalationEnabled) return true;
+
+    // Interval changed (for every_x_hours)
+    if (frequencyType == 'every_x_hours' || newFrequencyType == 'every_x_hours') {
+      if ((intervalHours ?? 8.0) != (newIntervalHours ?? 8.0)) return true;
+    }
+
+    // Scheduled times changed
+    if (!_listsEqual(scheduledTimes ?? [], newScheduledTimes ?? [])) return true;
+
+    // Scheduled days changed
+    if (!_listsEqual(
+      scheduledDays ?? [0, 1, 2, 3, 4, 5, 6],
+      newScheduledDays ?? [0, 1, 2, 3, 4, 5, 6],
+    )) return true;
+
+    return false;
+  }
+
+  bool _listsEqual<T>(List<T> a, List<T> b) {
+    if (a.length != b.length) return false;
+    for (int i = 0; i < a.length; i++) {
+      if (a[i] != b[i]) return false;
+    }
+    return true;
+  }
+
+  /// Generate a content hash for quick comparison
+  String getContentHash() {
+    final buffer = StringBuffer();
+    buffer.write('$frequencyType|');
+    buffer.write('$escalationEnabled|');
+    buffer.write('${intervalHours ?? 0}|');
+    buffer.write((scheduledTimes ?? []).map((t) => '${t.hour}:${t.minute}').join(','));
+    buffer.write('|');
+    buffer.write((scheduledDays ?? [0, 1, 2, 3, 4, 5, 6]).join(','));
+    return buffer.toString().hashCode.toString();
+  }
+
+  // ══════════════════════════════════════════════════════════════
+  // Helpers
+  // ══════════════════════════════════════════════════════════════
+
   bool get isDaily => frequencyType == 'daily';
   bool get isMultipleDaily => frequencyType == 'multiple_daily';
   bool get isIntervalBased => frequencyType == 'every_x_hours';
@@ -125,7 +180,5 @@ class MedicationSchedule {
 
   bool get isOngoing => endDate == null;
   bool get hasStarted => DateTime.now().isAfter(startDate);
-
-  bool get isExpired =>
-      endDate != null && DateTime.now().isAfter(endDate!);
+  bool get isExpired => endDate != null && DateTime.now().isAfter(endDate!);
 }

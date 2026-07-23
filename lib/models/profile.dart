@@ -12,8 +12,6 @@ class Profile {
   final DateTime createdAt;
   final DateTime updatedAt;
 
-  String? firstName;
-
   Profile({
     required this.id,
     required this.fullName,
@@ -29,16 +27,20 @@ class Profile {
 
   factory Profile.fromJson(Map<String, dynamic> json) {
     return Profile(
-      id: json['id'] as String,
-      fullName: json['full_name'] as String,
-      phoneNumber: json['phone_number'] as String?,
-      avatarUrl: json['avatar_url'] as String?,
-      role: json['role'] as String?,
-      timezone: json['timezone'] as String,
-      signupMethod: json['signup_method'] as String?,
+      id: json['id']?.toString() ?? '',
+      fullName: json['full_name']?.toString() ?? 'User',
+      phoneNumber: json['phone_number']?.toString(),
+      avatarUrl: json['avatar_url']?.toString(),
+      role: json['role']?.toString(),
+      timezone: json['timezone']?.toString() ?? 'UTC',
+      signupMethod: json['signup_method']?.toString(),
       onboardingCompleted: json['onboarding_completed'] as bool? ?? false,
-      createdAt: DateTime.parse(json['created_at'] as String),
-      updatedAt: DateTime.parse(json['updated_at'] as String),
+      createdAt: json['created_at'] != null
+          ? DateTime.tryParse(json['created_at'].toString()) ?? DateTime.now()
+          : DateTime.now(),
+      updatedAt: json['updated_at'] != null
+          ? DateTime.tryParse(json['updated_at'].toString()) ?? DateTime.now()
+          : DateTime.now(),
     );
   }
 
@@ -55,7 +57,14 @@ class Profile {
     };
   }
 
-  /// Helpers
+  /// Getters & Helpers
+  String get firstName {
+    final trimmed = fullName.trim();
+    if (trimmed.isEmpty) return 'User';
+    final parts = trimmed.split(RegExp(r'\s+'));
+    return parts.isNotEmpty ? parts.first : trimmed;
+  }
+
   bool get isPatient => role == 'patient';
   bool get isCaretaker => role == 'caretaker';
   bool get needsOnboarding => !onboardingCompleted || role == null;

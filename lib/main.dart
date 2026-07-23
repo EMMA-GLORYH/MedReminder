@@ -53,7 +53,7 @@ Future<void> main() async {
     debugPrint('$stack');
   }
 
-  // ══════════════════════════════════════════════════════════════
+  // ═════════════════════════════════════════════════════════════
   // NATIVE ALERT AND SCANNER ROUTING
   //
   // This is initialized separately from Supabase so that receiving and
